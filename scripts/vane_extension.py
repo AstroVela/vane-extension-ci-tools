@@ -303,6 +303,7 @@ def run_native(
         f"-DBUILD_EXTENSIONS={manifest.build_extensions_cmake}",
         f"-DUNITTEST_ROOT_DIRECTORY={extension_root}",
         "-DENABLE_UNITTEST_CPP_TESTS=FALSE",
+        "-DVCPKG_BUILD=ON",
         f"-DCMAKE_TOOLCHAIN_FILE={toolchain}",
         f"-DVCPKG_MANIFEST_DIR={extension_root}",
         f"-DVCPKG_TARGET_TRIPLET={target_triplet}",
