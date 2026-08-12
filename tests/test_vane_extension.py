@@ -35,7 +35,7 @@ class ManifestTests(unittest.TestCase):
                     "schema_version = 1",
                     'name = "iceberg"',
                     f'extension_config = "{config}"',
-                    'core_extensions = ["httpfs", "parquet", "tpch"]',
+                    'build_extensions = ["httpfs", "parquet", "tpch"]',
                     'native_test_selection = "test/"',
                     "",
                     "[vane]",
@@ -50,7 +50,7 @@ class ManifestTests(unittest.TestCase):
     def test_loads_strict_manifest(self) -> None:
         manifest = MODULE.load_manifest(self.write_manifest(), self.root)
         self.assertEqual(manifest.name, "iceberg")
-        self.assertEqual(manifest.core_extensions_cmake, "httpfs;parquet;tpch")
+        self.assertEqual(manifest.build_extensions_cmake, "httpfs;parquet;tpch")
         self.assertEqual(manifest.vane_repository, "AstroVela/vane")
 
     def test_rejects_non_exact_vane_revision(self) -> None:
@@ -119,7 +119,7 @@ class IdentityTests(unittest.TestCase):
                         "schema_version = 1",
                         'name = "iceberg"',
                         'extension_config = "extension_config.cmake"',
-                        'core_extensions = ["httpfs", "parquet"]',
+                        'build_extensions = ["httpfs", "parquet"]',
                         'native_test_selection = "test/"',
                         "",
                         "[vane]",

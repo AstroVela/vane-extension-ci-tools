@@ -1,7 +1,7 @@
 schema_version = 1
 name = "extension_name"
 extension_config = "extension_config.cmake"
-core_extensions = ["httpfs", "parquet"]
+build_extensions = ["httpfs", "parquet"]
 native_test_selection = "test/"
 
 [vane]

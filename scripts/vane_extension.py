@@ -33,14 +33,14 @@ class ExtensionManifest:
     schema_version: int
     name: str
     extension_config: str
-    core_extensions: tuple[str, ...]
+    build_extensions: tuple[str, ...]
     native_test_selection: str
     vane_repository: str
     vane_revision: str
 
     @property
-    def core_extensions_cmake(self) -> str:
-        return ";".join(self.core_extensions)
+    def build_extensions_cmake(self) -> str:
+        return ";".join(self.build_extensions)
 
 
 @dataclass(frozen=True)
@@ -116,16 +116,16 @@ def load_manifest(manifest_path: Path, extension_root: Path) -> ExtensionManifes
     if not extension_config_path.is_file():
         fail(f"extension_config does not exist: {extension_config_path}")
 
-    core_extensions_raw = raw.get("core_extensions")
-    if not isinstance(core_extensions_raw, list) or not core_extensions_raw:
-        fail("core_extensions must be a non-empty array")
-    core_extensions: list[str] = []
-    for value in core_extensions_raw:
+    build_extensions_raw = raw.get("build_extensions")
+    if not isinstance(build_extensions_raw, list) or not build_extensions_raw:
+        fail("build_extensions must be a non-empty array")
+    build_extensions: list[str] = []
+    for value in build_extensions_raw:
         if not isinstance(value, str) or not NAME_RE.fullmatch(value):
-            fail(f"core_extensions contains a non-canonical name: {value!r}")
-        if value in core_extensions:
-            fail(f"core_extensions contains a duplicate: {value}")
-        core_extensions.append(value)
+            fail(f"build_extensions contains a non-canonical name: {value!r}")
+        if value in build_extensions:
+            fail(f"build_extensions contains a duplicate: {value}")
+        build_extensions.append(value)
 
     native_test_selection = require_string(
         raw, "native_test_selection", "native_test_selection"
@@ -148,7 +148,7 @@ def load_manifest(manifest_path: Path, extension_root: Path) -> ExtensionManifes
         schema_version=schema_version,
         name=name,
         extension_config=extension_config,
-        core_extensions=tuple(core_extensions),
+        build_extensions=tuple(build_extensions),
         native_test_selection=native_test_selection,
         vane_repository=vane_repository,
         vane_revision=vane_revision,
@@ -300,11 +300,9 @@ def run_native(
         "-DENABLE_EXTENSION_AUTOLOADING=OFF",
         "-DENABLE_EXTENSION_AUTOINSTALL=OFF",
         f"-DDUCKDB_EXTENSION_CONFIGS={extension_config}",
-        f"-DCORE_EXTENSIONS={manifest.core_extensions_cmake}",
+        f"-DBUILD_EXTENSIONS={manifest.build_extensions_cmake}",
         f"-DUNITTEST_ROOT_DIRECTORY={extension_root}",
-        f"-DBENCHMARK_ROOT_DIRECTORY={extension_root}",
         "-DENABLE_UNITTEST_CPP_TESTS=FALSE",
-        "-DVCPKG_BUILD=ON",
         f"-DCMAKE_TOOLCHAIN_FILE={toolchain}",
         f"-DVCPKG_MANIFEST_DIR={extension_root}",
         f"-DVCPKG_TARGET_TRIPLET={target_triplet}",
@@ -349,7 +347,7 @@ def manifest_outputs(
                 extension_root, manifest.extension_config, "extension_config"
             )
         ),
-        "core_extensions": manifest.core_extensions_cmake,
+        "build_extensions": manifest.build_extensions_cmake,
         "native_test_selection": manifest.native_test_selection,
         "vane_repository": manifest.vane_repository,
         "vane_revision": manifest.vane_revision,
