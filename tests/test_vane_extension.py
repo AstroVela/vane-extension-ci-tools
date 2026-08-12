@@ -142,5 +142,16 @@ class IdentityTests(unittest.TestCase):
         self.assertIsNotNone(MODULE.SOURCE_ID_RE.fullmatch("c" * 64))
 
 
+class NativeTestOutputTests(unittest.TestCase):
+    def test_accepts_executed_test_output(self) -> None:
+        MODULE.verify_selected_test_output("All tests passed (144 assertions)\n")
+
+    def test_rejects_all_skipped_test_output(self) -> None:
+        with self.assertRaisesRegex(MODULE.ConfigurationError, "all test cases"):
+            MODULE.verify_selected_test_output(
+                "All tests were skipped (total skipped 1)\n"
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

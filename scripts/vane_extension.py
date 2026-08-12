@@ -238,6 +238,27 @@ def require_positive_int(value: str, label: str) -> int:
     return parsed
 
 
+def verify_selected_test_output(output: str) -> None:
+    if "All tests were skipped" in output:
+        fail("selected native test did not execute: all test cases were skipped")
+
+
+def run_selected_test(test_binary: Path, selection: str, extension_root: Path) -> None:
+    command = [str(test_binary), selection]
+    print(f"+ {' '.join(command)}", file=sys.stderr)
+    result = subprocess.run(
+        command,
+        cwd=extension_root,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    print(result.stdout, end="")
+    result.check_returncode()
+    verify_selected_test_output(result.stdout)
+
+
 def run_native(
     extension_root: Path,
     manifest: ExtensionManifest,
@@ -315,10 +336,7 @@ def run_native(
     test_binary = build_dir / "test/unittest"
     if not test_binary.is_file():
         fail(f"DuckDB unittest binary was not generated: {test_binary}")
-    run(
-        [str(test_binary), manifest.native_test_selection],
-        cwd=extension_root,
-    )
+    run_selected_test(test_binary, manifest.native_test_selection, extension_root)
 
 
 def manifest_outputs(
