@@ -25,4 +25,4 @@ jobs:
       - name: Run tests
         run: python -m unittest discover -s tests -v
       - name: Check whitespace
-        run: git diff --check HEAD^
+        run: git show --check --format= HEAD
