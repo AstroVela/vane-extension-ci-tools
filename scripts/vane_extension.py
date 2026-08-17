@@ -33,6 +33,7 @@ CI_TOOLS_REPOSITORY = "AstroVela/vane-extension-ci-tools"
 CI_TOOLS_REPOSITORY_URL = f"https://github.com/{CI_TOOLS_REPOSITORY}.git"
 CI_TOOLS_WORKFLOW_PATH = ".github/workflows/_vane_extension_ci.yml"
 OIDC_AUDIENCE = "vane-extension-ci-tools"
+LINUX_X86_64_RENAMEAT2_SYSCALL = 316
 
 
 class ConfigurationError(RuntimeError):
@@ -312,26 +313,28 @@ def unshallow_vane_checkout(vane_source: Path, manifest: ExtensionManifest) -> N
 
 
 def publish_vane_checkout(staged_source: Path, vane_source: Path) -> None:
-    try:
-        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
-    except (AttributeError, OSError):
-        fail("atomic Vane checkout publication requires Linux renameat2")
+    if (
+        sys.platform != "linux"
+        or os.uname().machine != "x86_64"
+        or ctypes.sizeof(ctypes.c_void_p) != 8
+    ):
+        fail("atomic Vane checkout publication requires 64-bit x86 Linux renameat2")
 
-    renameat2.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    renameat2.restype = ctypes.c_int
+    try:
+        syscall = ctypes.CDLL(None, use_errno=True).syscall
+    except (AttributeError, OSError):
+        fail("atomic Vane checkout publication requires the Linux syscall interface")
+
+    syscall.argtypes = [ctypes.c_long]
+    syscall.restype = ctypes.c_long
     ctypes.set_errno(0)
-    result = renameat2(
-        -100,  # AT_FDCWD
-        os.fsencode(staged_source),
-        -100,  # AT_FDCWD
-        os.fsencode(vane_source),
-        1,  # RENAME_NOREPLACE
+    result = syscall(
+        LINUX_X86_64_RENAMEAT2_SYSCALL,
+        ctypes.c_int(-100),  # AT_FDCWD
+        ctypes.c_char_p(os.fsencode(staged_source)),
+        ctypes.c_int(-100),  # AT_FDCWD
+        ctypes.c_char_p(os.fsencode(vane_source)),
+        ctypes.c_uint(1),  # RENAME_NOREPLACE
     )
     if result == 0:
         return
@@ -339,6 +342,8 @@ def publish_vane_checkout(staged_source: Path, vane_source: Path) -> None:
     error_number = ctypes.get_errno()
     if error_number == errno.EEXIST:
         fail(f"Vane source appeared during preparation: {vane_source}")
+    if error_number == errno.ENOSYS:
+        fail("atomic Vane checkout publication requires Linux renameat2 support")
     raise OSError(error_number, os.strerror(error_number), vane_source)
 
 

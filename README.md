@@ -84,12 +84,13 @@ the complete Git history required by Vane's identity resolver. A new checkout
 is prepared and verified in a temporary sibling directory, then atomically
 published without replacing a destination that appeared concurrently. A failed
 fetch leaves the destination free for a clean retry. Atomic publication requires
-Linux `renameat2`; the tools fail instead of falling back to a replacement-prone
-rename. If that checkout already exists, it must be clean and at the exact
-revision; a shallow checkout is safely unshallowed. Existing checkouts are
-always verified by fetching the exact revision directly from the hard-coded
-official `AstroVela/vane` URL; a different `origin` cannot substitute a
-fork-only commit. The tools never reset or clean working-tree changes.
+64-bit x86 Linux `renameat2`, invoked through the kernel syscall rather than a
+libc `renameat2` wrapper; the tools fail instead of falling back to a
+replacement-prone rename. If that checkout already exists, it must be clean and
+at the exact revision; a shallow checkout is safely unshallowed. Existing
+checkouts are always verified by fetching the exact revision directly from the
+hard-coded official `AstroVela/vane` URL; a different `origin` cannot substitute
+a fork-only commit. The tools never reset or clean working-tree changes.
 
 Override generated locations without changing the manifest:
 

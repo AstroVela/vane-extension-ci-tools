@@ -345,24 +345,75 @@ class VaneCheckoutTests(unittest.TestCase):
             self.assertEqual(list(vane_source.iterdir()), [])
             self.assertEqual(list(root.glob(".vane-source.prepare-*")), [])
 
-    def test_publish_has_no_non_atomic_fallback(self) -> None:
+    def test_publish_uses_syscall_without_a_libc_renameat2_wrapper(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             staged_source = root / "staged-source"
             staged_source.mkdir()
             (staged_source / "marker").write_text("verified\n")
             vane_source = root / "vane-source"
+            syscall_only_libc = mock.Mock(
+                spec_set=["syscall"],
+                syscall=MODULE.ctypes.CDLL(None, use_errno=True).syscall,
+            )
+
+            with mock.patch.object(
+                MODULE.ctypes, "CDLL", return_value=syscall_only_libc
+            ):
+                MODULE.publish_vane_checkout(staged_source, vane_source)
+
+            self.assertFalse(os.path.lexists(staged_source))
+            self.assertEqual((vane_source / "marker").read_text(), "verified\n")
+
+    def test_publish_has_no_non_atomic_fallback_when_syscall_is_unavailable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            staged_source = root / "staged-source"
+            staged_source.mkdir()
+            (staged_source / "marker").write_text("verified\n")
+            vane_source = root / "vane-source"
+            syscall = mock.Mock(return_value=-1)
+            syscall_only_libc = mock.Mock(spec_set=["syscall"], syscall=syscall)
 
             with (
-                mock.patch.object(MODULE.ctypes, "CDLL", return_value=object()),
+                mock.patch.object(
+                    MODULE.ctypes, "CDLL", return_value=syscall_only_libc
+                ),
+                mock.patch.object(
+                    MODULE.ctypes,
+                    "get_errno",
+                    return_value=MODULE.errno.ENOSYS,
+                ),
                 self.assertRaisesRegex(
-                    MODULE.ConfigurationError, "requires Linux renameat2"
+                    MODULE.ConfigurationError, "requires Linux renameat2 support"
                 ),
             ):
                 MODULE.publish_vane_checkout(staged_source, vane_source)
 
             self.assertTrue((staged_source / "marker").is_file())
             self.assertFalse(os.path.lexists(vane_source))
+
+    def test_publish_rejects_non_x86_64_linux(self) -> None:
+        staged_source = Path("staged-source")
+        vane_source = Path("vane-source")
+
+        with (
+            mock.patch.object(MODULE.sys, "platform", "linux"),
+            mock.patch.object(
+                MODULE.os,
+                "uname",
+                return_value=mock.Mock(machine="aarch64"),
+            ),
+            mock.patch.object(MODULE.ctypes, "CDLL") as load_libc,
+            self.assertRaisesRegex(
+                MODULE.ConfigurationError, "requires 64-bit x86 Linux"
+            ),
+        ):
+            MODULE.publish_vane_checkout(staged_source, vane_source)
+
+        load_libc.assert_not_called()
 
     def test_prepare_unshallows_existing_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
