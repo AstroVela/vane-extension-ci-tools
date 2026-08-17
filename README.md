@@ -23,9 +23,12 @@ Vane-only integration layer.
   the scripts in the selected Vane checkout.
 - The standard DuckDB extension targets are not replaced. All Make targets
   provided here use the `vane_` prefix.
-- The initial native lane disables Arrow Flight exchange while compiling and
-  running the extension's original DuckDB tests. Full Vane wheel, Ray, and FTE
-  lanes will use Vane's complete pinned native dependency set.
+- The native lane disables Arrow Flight exchange while compiling and running
+  the extension's original DuckDB tests. The wheel lane enables distributed
+  exchange and uses the exact Vane checkout's complete native dependency set.
+- Wheel verification disables extension autoload and autoinstall, loads the
+  target only from the wheel, and requires it to report `STATICALLY_LINKED`.
+  Ray and service-backed end-to-end lanes are separate later stages.
 
 ## Extension layout
 
@@ -52,7 +55,8 @@ include vane-extension-ci-tools/makefiles/vane_extension.Makefile
 ```
 
 The second include only defines `vane_verify_ci_tools`, `vane_validate`,
-`vane_prepare`, `vane_identity`, `vane_native`, and `vane_ci`.
+`vane_prepare`, `vane_identity`, `vane_native`, `vane_ci`,
+`vane_wheel_dependencies`, and `vane_wheel`.
 
 ## Manifest
 
@@ -60,9 +64,11 @@ Copy [`templates/vane-extension.toml`](templates/vane-extension.toml) into the
 extension repository and replace every placeholder with a reviewed value. The
 Vane revision must be a complete lowercase 40-character commit SHA.
 
-The manifest describes source and test selection only. Distributed scan and
-write protocol versions remain owned by the extension's C++ registrations and
-the runtime capability manifest.
+The manifest describes source and test selection only. `build_extensions`
+lists supporting extensions; it must not repeat the target `name`, whose source
+and link policy are owned by `extension_config`. Distributed scan and write
+protocol versions remain owned by the extension's C++ registrations and the
+runtime capability manifest.
 
 ## Local native lane
 
@@ -90,7 +96,10 @@ replacement-prone rename. If that checkout already exists, it must be clean and
 at the exact revision; a shallow checkout is safely unshallowed. Existing
 checkouts are always verified by fetching the exact revision directly from the
 hard-coded official `AstroVela/vane` URL; a different `origin` cannot substitute
-a fork-only commit. The tools never reset or clean working-tree changes.
+a fork-only commit. Preparation also fetches release tags from that same
+official URL and requires every local tag ref to match it exactly, so wheel
+metadata cannot use missing, moved, or private tags. The tools never reset or
+clean working-tree changes.
 
 Override generated locations without changing the manifest:
 
@@ -101,6 +110,37 @@ make vane_ci \
   VANE_BUILD_JOBS=8
 ```
 
+## Local wheel lane
+
+The wheel lane is intentionally Linux x86_64 only. It bootstraps Arrow Flight,
+gRPC, and the rest of Vane's native dependencies from the exact pinned Vane
+checkout, then builds the extension's own vcpkg manifest separately:
+
+```bash
+python3 -m pip install \
+  build \
+  "cmake>=3.29" \
+  "ninja>=1.10" \
+  "pybind11[global]>=3.0.0" \
+  "scikit-build-core>=0.11.4" \
+  "setuptools-scm>=9.2.0"
+export VCPKG_TOOLCHAIN_PATH=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake
+make vane_wheel VANE_BUILD_JOBS=8
+```
+
+The output is written to `build/vane-wheel/dist`. A fresh virtual environment
+installs that wheel and its Python dependencies, with DuckDB extension
+autoinstall and autoload disabled. Verification performs `LOAD` without
+`INSTALL`, requires the manifest target to be statically linked, and compares
+the embedded Vane fork version and the 10-character DuckDB SourceID reported
+by Vane with the corresponding prefix of the exact checkout's verified full
+SourceID.
+
+Generated locations can be overridden with `VANE_WHEEL_BUILD_DIR`,
+`VANE_WHEEL_DIST_DIR`, `VANE_VCPKG_ROOT`, and
+`VANE_VCPKG_INSTALLED_DIR`. The supported vcpkg triplet is exactly
+`x64-linux`; there is no alternate-platform or dependency fallback.
+
 ## GitHub Actions
 
 An extension calls the reusable workflow with the same exact tool revision as
@@ -108,7 +148,7 @@ its `vane-extension-ci-tools` submodule:
 
 ```yaml
 jobs:
-  vane-native:
+  vane-extension:
     # Reusable workflows cannot elevate this permission from the caller.
     permissions:
       contents: read
@@ -117,6 +157,7 @@ jobs:
     with:
       ci_tools_version: TOOLS_COMMIT_SHA
       manifest: vane-extension.toml
+      build_jobs: 8
 ```
 
 The caller must grant `id-token: write`: a reusable workflow cannot elevate
@@ -124,8 +165,9 @@ permissions inherited from its caller. The workflow verifies the caller's
 submodule gitlink and uses GitHub's signed OIDC claims to verify that the
 reusable workflow itself was invoked at that same commit SHA. Only the isolated
 verification job receives OIDC permission; the extension build and tests run in
-a separate job with `contents: read` alone. The workflow uses no deployment
-secrets and requests an OIDC token only for this identity attestation.
+separate jobs with `contents: read` alone. The verified wheel is uploaded as
+`vane-<extension-name>-wheel`. The workflow uses no deployment secrets and
+requests an OIDC token only for this identity attestation.
 
 ## Development
 
