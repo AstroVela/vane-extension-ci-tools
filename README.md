@@ -104,10 +104,11 @@ jobs:
 
 The caller must grant `id-token: write`: a reusable workflow cannot elevate
 permissions inherited from its caller. The workflow verifies the caller's
-submodule pin and uses GitHub's signed OIDC claims to verify that the reusable
-workflow itself was invoked at that same commit SHA before executing repository
-code. It has read-only repository access, uses no deployment secrets, and
-requests an OIDC token only for this identity attestation.
+submodule gitlink and uses GitHub's signed OIDC claims to verify that the
+reusable workflow itself was invoked at that same commit SHA. Only the isolated
+verification job receives OIDC permission; the extension build and tests run in
+a separate job with `contents: read` alone. The workflow uses no deployment
+secrets and requests an OIDC token only for this identity attestation.
 
 ## Development
 

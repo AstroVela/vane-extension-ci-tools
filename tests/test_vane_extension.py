@@ -32,6 +32,7 @@ class ManifestTests(unittest.TestCase):
         revision: str = "a" * 40,
         config: str = "extension_config.cmake",
         repository: str = "AstroVela/vane",
+        native_test_selection: str = "test/",
     ) -> Path:
         path = self.root / "vane-extension.toml"
         path.write_text(
@@ -41,7 +42,7 @@ class ManifestTests(unittest.TestCase):
                     'name = "iceberg"',
                     f'extension_config = "{config}"',
                     'build_extensions = ["httpfs", "parquet", "tpch"]',
-                    'native_test_selection = "test/"',
+                    f'native_test_selection = "{native_test_selection}"',
                     "",
                     "[vane]",
                     f'repository = "{repository}"',
@@ -66,6 +67,14 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.ConfigurationError, "placeholder"):
             MODULE.load_manifest(self.write_manifest("0" * 40), self.root)
 
+    def test_rejects_boolean_schema_version(self) -> None:
+        path = self.write_manifest()
+        path.write_text(
+            path.read_text().replace("schema_version = 1", "schema_version = true")
+        )
+        with self.assertRaisesRegex(MODULE.ConfigurationError, "schema_version"):
+            MODULE.load_manifest(path, self.root)
+
     def test_rejects_noncanonical_vane_repository(self) -> None:
         with self.assertRaisesRegex(
             MODULE.ConfigurationError, "must be AstroVela/vane"
@@ -78,6 +87,19 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.ConfigurationError, "escapes"):
             MODULE.load_manifest(
                 self.write_manifest(config="../outside.cmake"), self.root
+            )
+
+    def test_rejects_manifest_outside_root(self) -> None:
+        outside = self.root.parent / f"{self.root.name}-outside.toml"
+        outside.write_text(self.write_manifest().read_text())
+        self.addCleanup(outside.unlink, missing_ok=True)
+        with self.assertRaisesRegex(MODULE.ConfigurationError, "manifest escapes"):
+            MODULE.load_manifest(outside, self.root)
+
+    def test_rejects_native_test_command_line_option(self) -> None:
+        with self.assertRaisesRegex(MODULE.ConfigurationError, "command-line option"):
+            MODULE.load_manifest(
+                self.write_manifest(native_test_selection="--list-tests"), self.root
             )
 
 
@@ -233,8 +255,7 @@ class VaneCheckoutTests(unittest.TestCase):
                 "2",
             )
             self.assertEqual(
-                self.git(vane_source, "rev-list", "--count", "HEAD", capture=True),
-                "2",
+                self.git(vane_source, "rev-parse", "HEAD", capture=True), revision
             )
 
     def test_prepare_unshallows_existing_checkout(self) -> None:
@@ -288,6 +309,7 @@ class ReusableWorkflowIdentityTests(unittest.TestCase):
         MODULE.verify_reusable_workflow_identity(
             self.token(
                 {
+                    "aud": MODULE.OIDC_AUDIENCE,
                     "job_workflow_ref": (
                         "AstroVela/vane-extension-ci-tools/"
                         ".github/workflows/_vane_extension_ci.yml@" + revision
@@ -304,6 +326,7 @@ class ReusableWorkflowIdentityTests(unittest.TestCase):
             MODULE.verify_reusable_workflow_identity(
                 self.token(
                     {
+                        "aud": MODULE.OIDC_AUDIENCE,
                         "job_workflow_ref": (
                             "AstroVela/vane-extension-ci-tools/"
                             ".github/workflows/_vane_extension_ci.yml@refs/heads/main"
@@ -320,6 +343,7 @@ class ReusableWorkflowIdentityTests(unittest.TestCase):
             MODULE.verify_reusable_workflow_identity(
                 self.token(
                     {
+                        "aud": MODULE.OIDC_AUDIENCE,
                         "job_workflow_ref": (
                             "AstroVela/vane-extension-ci-tools/"
                             ".github/workflows/_vane_extension_ci.yml@" + revision
@@ -330,8 +354,25 @@ class ReusableWorkflowIdentityTests(unittest.TestCase):
                 revision,
             )
 
+    def test_rejects_mismatched_oidc_audience(self) -> None:
+        revision = "a" * 40
+        with self.assertRaisesRegex(MODULE.ConfigurationError, "audience mismatch"):
+            MODULE.verify_reusable_workflow_identity(
+                self.token(
+                    {
+                        "aud": "different-audience",
+                        "job_workflow_ref": (
+                            "AstroVela/vane-extension-ci-tools/"
+                            ".github/workflows/_vane_extension_ci.yml@" + revision
+                        ),
+                        "job_workflow_sha": revision,
+                    }
+                ),
+                revision,
+            )
 
-class DocumentationTests(unittest.TestCase):
+
+class WorkflowContractTests(unittest.TestCase):
     def test_reusable_workflow_example_grants_caller_oidc_permission(self) -> None:
         readme = (Path(__file__).parents[1] / "README.md").read_text()
         self.assertIn("id-token: write", readme)
@@ -339,6 +380,23 @@ class DocumentationTests(unittest.TestCase):
             "Reusable workflows cannot elevate this permission from the caller.",
             readme,
         )
+
+    def test_oidc_permission_is_isolated_from_native_build(self) -> None:
+        workflow = (
+            Path(__file__).parents[1] / ".github/workflows/_vane_extension_ci.yml"
+        ).read_text()
+        verify_job, native_job = workflow.split("  native:\n", 1)
+        self.assertIn("  verify_workflow:\n", verify_job)
+        self.assertIn("id-token: write", verify_job)
+        self.assertIn("needs: verify_workflow", native_job)
+        self.assertNotIn("id-token: write", native_job)
+
+    def test_ci_tools_input_is_not_interpolated_into_shell(self) -> None:
+        workflow = (
+            Path(__file__).parents[1] / ".github/workflows/_vane_extension_ci.yml"
+        ).read_text()
+        self.assertIn("VANE_CI_TOOLS_VERSION: ${{ inputs.ci_tools_version }}", workflow)
+        self.assertNotIn('"${{ inputs.ci_tools_version }}"', workflow)
 
 
 class NativeTestOutputTests(unittest.TestCase):
@@ -349,6 +407,12 @@ class NativeTestOutputTests(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.ConfigurationError, "all test cases"):
             MODULE.verify_selected_test_output(
                 "All tests were skipped (total skipped 1)\n"
+            )
+
+    def test_rejects_no_matching_test_output(self) -> None:
+        with self.assertRaisesRegex(MODULE.ConfigurationError, "no test cases"):
+            MODULE.verify_selected_test_output(
+                "No test cases matched 'missing/'\nNo tests ran\n"
             )
 
 

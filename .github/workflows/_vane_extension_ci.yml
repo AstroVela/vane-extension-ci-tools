@@ -30,21 +30,79 @@ on:
 
 permissions:
   contents: read
-  # GitHub-signed OIDC claims attest to the immutable reusable-workflow SHA.
-  # This grants no repository write access and is not used for deployment.
-  id-token: write
 
 jobs:
+  verify_workflow:
+    name: Verify pinned Vane CI workflow
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # GitHub-signed OIDC claims attest to the immutable reusable-workflow SHA.
+      id-token: write
+    env:
+      VANE_EXTENSION_ROOT: ${{ github.workspace }}/extension
+      VANE_MANIFEST: ${{ github.workspace }}/extension/${{ inputs.manifest }}
+      VANE_CI_TOOLS_VERSION: ${{ inputs.ci_tools_version }}
+
+    steps:
+      - name: Checkout extension without submodules
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: extension
+          persist-credentials: false
+
+      - name: Verify caller CI-tools pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$VANE_CI_TOOLS_VERSION" =~ ^[0-9a-f]{40}$ ]]
+          entry="$(git -C extension ls-tree HEAD -- vane-extension-ci-tools)"
+          read -r mode type actual path <<< "$entry"
+          test "$mode" = "160000"
+          test "$type" = "commit"
+          test "$path" = "vane-extension-ci-tools"
+          test "$actual" = "$VANE_CI_TOOLS_VERSION"
+
+      - name: Checkout exact official Vane CI tools
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: AstroVela/vane-extension-ci-tools
+          ref: ${{ inputs.ci_tools_version }}
+          path: ci-tools
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Verify pinned reusable workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git -C ci-tools rev-parse HEAD)"
+          test "$actual" = "$VANE_CI_TOOLS_VERSION"
+          python ci-tools/scripts/vane_extension.py \
+            --manifest "$VANE_MANIFEST" \
+            --extension-root "$VANE_EXTENSION_ROOT" \
+            verify-reusable-workflow \
+            --expected-sha "$VANE_CI_TOOLS_VERSION"
+
   native:
     name: Vane DuckDB native extension
+    needs: verify_workflow
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    permissions:
+      contents: read
     env:
       VANE_EXTENSION_ROOT: ${{ github.workspace }}/extension
       VANE_MANIFEST: ${{ github.workspace }}/extension/${{ inputs.manifest }}
       VANE_SOURCE_DIR: ${{ github.workspace }}/vane
       VANE_NATIVE_BUILD_DIR: ${{ github.workspace }}/build/vane-native
       VANE_BUILD_JOBS: ${{ inputs.build_jobs }}
+      VANE_CI_TOOLS_VERSION: ${{ inputs.ci_tools_version }}
       VCPKG_TARGET_TRIPLET: x64-linux
 
     steps:
@@ -54,32 +112,20 @@ jobs:
           path: extension
           fetch-depth: 0
           submodules: recursive
-
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: ${{ inputs.python_version }}
+          persist-credentials: false
 
       - name: Verify pinned Vane CI tools
         shell: bash
         run: |
           set -euo pipefail
-          [[ "${{ inputs.ci_tools_version }}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$VANE_CI_TOOLS_VERSION" =~ ^[0-9a-f]{40}$ ]]
           actual="$(git -C extension/vane-extension-ci-tools rev-parse HEAD)"
-          test "$actual" = "${{ inputs.ci_tools_version }}"
+          test "$actual" = "$VANE_CI_TOOLS_VERSION"
 
-      - name: Verify pinned reusable workflow
-        shell: bash
-        run: |
-          set -euo pipefail
-          python extension/vane-extension-ci-tools/scripts/vane_extension.py \
-            --manifest "$VANE_MANIFEST" \
-            --extension-root "$VANE_EXTENSION_ROOT" \
-            verify-reusable-workflow \
-            --expected-sha "${{ inputs.ci_tools_version }}"
-
-      - name: Install CMake and Ninja
-        run: python -m pip install "cmake>=3.29" "ninja>=1.10"
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ inputs.python_version }}
 
       - name: Read integration manifest
         id: manifest
@@ -97,6 +143,18 @@ jobs:
           ref: ${{ steps.manifest.outputs.vane_revision }}
           path: vane
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate Vane identity
+        run: |
+          python extension/vane-extension-ci-tools/scripts/vane_extension.py \
+            --manifest "$VANE_MANIFEST" \
+            --extension-root "$VANE_EXTENSION_ROOT" \
+            identity \
+            --vane-source "$VANE_SOURCE_DIR"
+
+      - name: Install CMake and Ninja
+        run: python -m pip install "cmake>=3.29" "ninja>=1.10"
 
       - name: Read vcpkg baseline
         id: vcpkg
@@ -111,14 +169,6 @@ jobs:
         with:
           vcpkgGitCommitId: ${{ steps.vcpkg.outputs.baseline }}
           vcpkgDirectory: ${{ github.workspace }}/vcpkg
-
-      - name: Validate Vane identity
-        run: |
-          python extension/vane-extension-ci-tools/scripts/vane_extension.py \
-            --manifest "$VANE_MANIFEST" \
-            --extension-root "$VANE_EXTENSION_ROOT" \
-            identity \
-            --vane-source "$VANE_SOURCE_DIR"
 
       - name: Build and test extension against Vane DuckDB
         env:

@@ -100,16 +100,23 @@ def require_string(table: dict[str, object], key: str, label: str) -> str:
 
 
 def load_manifest(manifest_path: Path, extension_root: Path) -> ExtensionManifest:
+    resolved_root = extension_root.resolve()
+    resolved_manifest = manifest_path.resolve()
     try:
-        with manifest_path.open("rb") as handle:
+        resolved_manifest.relative_to(resolved_root)
+    except ValueError:
+        fail(f"manifest escapes the extension root: {manifest_path}")
+
+    try:
+        with resolved_manifest.open("rb") as handle:
             raw = tomllib.load(handle)
     except FileNotFoundError:
-        fail(f"manifest does not exist: {manifest_path}")
+        fail(f"manifest does not exist: {resolved_manifest}")
     except tomllib.TOMLDecodeError as exc:
-        fail(f"invalid TOML in {manifest_path}: {exc}")
+        fail(f"invalid TOML in {resolved_manifest}: {exc}")
 
     schema_version = raw.get("schema_version")
-    if schema_version != SCHEMA_VERSION:
+    if type(schema_version) is not int or schema_version != SCHEMA_VERSION:
         fail(f"schema_version must be {SCHEMA_VERSION}, got {schema_version!r}")
 
     name = require_string(raw, "name", "name")
@@ -137,6 +144,8 @@ def load_manifest(manifest_path: Path, extension_root: Path) -> ExtensionManifes
     native_test_selection = require_string(
         raw, "native_test_selection", "native_test_selection"
     )
+    if native_test_selection.startswith("-"):
+        fail("native_test_selection must be a test selector, not a command-line option")
     resolve_within(extension_root, native_test_selection, "native_test_selection")
 
     vane_raw = raw.get("vane")
@@ -258,6 +267,11 @@ def verify_reusable_workflow_identity(token: str, expected_sha: str) -> None:
             "expected reusable workflow SHA must be a full lowercase 40-character commit SHA"
         )
     claims = decode_jwt_claims(token)
+    if claims.get("aud") != OIDC_AUDIENCE:
+        fail(
+            "reusable workflow token audience mismatch: "
+            f"expected {OIDC_AUDIENCE}, got {claims.get('aud')!r}"
+        )
     expected_ref = f"{CI_TOOLS_REPOSITORY}/{CI_TOOLS_WORKFLOW_PATH}@{expected_sha}"
     if claims.get("job_workflow_ref") != expected_ref:
         fail(
@@ -341,6 +355,8 @@ def require_positive_int(value: str, label: str) -> int:
 def verify_selected_test_output(output: str) -> None:
     if "All tests were skipped" in output:
         fail("selected native test did not execute: all test cases were skipped")
+    if "No tests ran" in output:
+        fail("selected native test did not execute: no test cases ran")
 
 
 def run_selected_test(test_binary: Path, selection: str, extension_root: Path) -> None:

@@ -13,7 +13,7 @@ VANE_PYTHON ?= python3
 VANE_SKIP_NATIVE_TESTS ?= 0
 
 VANE_EXTENSION_COMMAND = $(VANE_PYTHON) \
-	$(VANE_EXTENSION_CI_TOOLS_DIR)/scripts/vane_extension.py \
+	"$(VANE_EXTENSION_CI_TOOLS_DIR)/scripts/vane_extension.py" \
 	--manifest "$(VANE_MANIFEST)" \
 	--extension-root "$(VANE_EXTENSION_ROOT)"
 
