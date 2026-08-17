@@ -10,12 +10,13 @@ import errno
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
 import urllib.parse
 import urllib.request
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import NoReturn
@@ -34,6 +35,66 @@ CI_TOOLS_REPOSITORY_URL = f"https://github.com/{CI_TOOLS_REPOSITORY}.git"
 CI_TOOLS_WORKFLOW_PATH = ".github/workflows/_vane_extension_ci.yml"
 OIDC_AUDIENCE = "vane-extension-ci-tools"
 LINUX_X86_64_RENAMEAT2_SYSCALL = 316
+VANE_WHEEL_VERIFY_SCRIPT = r"""
+import json
+import sys
+
+import vane
+
+extension_name, expected_version, expected_source_id = sys.argv[1:]
+connection = vane.connect(
+    ":memory:",
+    config={
+        "autoinstall_known_extensions": "false",
+        "autoload_known_extensions": "false",
+    },
+)
+extension = connection.execute(
+    "SELECT loaded, install_mode FROM duckdb_extensions() "
+    "WHERE extension_name = ?",
+    [extension_name],
+).fetchone()
+if extension is None:
+    raise RuntimeError(f"wheel does not contain extension {extension_name!r}")
+if extension[1] != "STATICALLY_LINKED":
+    raise RuntimeError(
+        f"extension {extension_name!r} is not statically linked: {extension[1]!r}"
+    )
+connection.execute(f"LOAD {extension_name}")
+loaded = connection.execute(
+    "SELECT loaded FROM duckdb_extensions() WHERE extension_name = ?",
+    [extension_name],
+).fetchone()
+if loaded != (True,):
+    raise RuntimeError(f"extension {extension_name!r} did not load from the wheel")
+actual_version, actual_source_id = connection.execute(
+    "SELECT library_version, source_id FROM pragma_version()"
+).fetchone()
+if actual_version != expected_version:
+    raise RuntimeError(
+        f"Vane fork version mismatch: expected {expected_version!r}, "
+        f"got {actual_version!r}"
+    )
+expected_runtime_source_id = expected_source_id[:10]
+if actual_source_id != expected_runtime_source_id:
+    raise RuntimeError(
+        "DuckDB SourceID mismatch: expected the prefix "
+        f"{expected_runtime_source_id!r} of the verified full SourceID "
+        f"{expected_source_id!r}, "
+        f"got {actual_source_id!r}"
+    )
+print(
+    json.dumps(
+        {
+            "extension": extension_name,
+            "fork_version": actual_version,
+            "source_id": actual_source_id,
+            "install_mode": extension[1],
+        },
+        sort_keys=True,
+    )
+)
+"""
 
 
 class ConfigurationError(RuntimeError):
@@ -71,6 +132,7 @@ def run(
     *,
     cwd: Path | None = None,
     capture: bool = False,
+    env: Mapping[str, str] | None = None,
 ) -> str:
     rendered = " ".join(command)
     print(f"+ {rendered}", file=sys.stderr)
@@ -80,6 +142,7 @@ def run(
         check=True,
         text=True,
         stdout=subprocess.PIPE if capture else None,
+        env=dict(env) if env is not None else None,
     )
     return result.stdout.strip() if capture else ""
 
@@ -145,6 +208,11 @@ def load_manifest(manifest_path: Path, extension_root: Path) -> ExtensionManifes
         if value in build_extensions:
             fail(f"build_extensions contains a duplicate: {value}")
         build_extensions.append(value)
+    if name in build_extensions:
+        fail(
+            "build_extensions must not contain the target extension; "
+            "extension_config owns its source selection"
+        )
 
     native_test_selection = require_string(
         raw, "native_test_selection", "native_test_selection"
@@ -265,6 +333,57 @@ def verify_official_vane_revision(manifest: ExtensionManifest) -> None:
     )
 
 
+def parse_vane_tag_refs(output: str, label: str) -> dict[str, str]:
+    tags: dict[str, str] = {}
+    for line in output.splitlines():
+        fields = line.split(maxsplit=1)
+        if len(fields) != 2:
+            fail(f"{label} returned an invalid Vane tag ref: {line!r}")
+        object_id, ref = fields
+        if ref.endswith("^{}"):
+            continue
+        if not FULL_SHA_RE.fullmatch(object_id) or not ref.startswith("refs/tags/"):
+            fail(f"{label} returned an invalid Vane tag ref: {line!r}")
+        if ref in tags:
+            fail(f"{label} returned a duplicate Vane tag ref: {ref}")
+        tags[ref] = object_id
+    return tags
+
+
+def fetch_official_vane_tags(vane_source: Path) -> None:
+    run(["git", "fetch", "--tags", VANE_REPOSITORY_URL], cwd=vane_source)
+    official_tags = parse_vane_tag_refs(
+        run(
+            ["git", "ls-remote", "--tags", VANE_REPOSITORY_URL],
+            capture=True,
+        ),
+        VANE_REPOSITORY,
+    )
+    local_tags = parse_vane_tag_refs(
+        run(
+            [
+                "git",
+                "for-each-ref",
+                "--format=%(objectname) %(refname)",
+                "refs/tags",
+            ],
+            cwd=vane_source,
+            capture=True,
+        ),
+        "Vane checkout",
+    )
+    differing_refs = sorted(
+        ref
+        for ref in official_tags.keys() | local_tags.keys()
+        if official_tags.get(ref) != local_tags.get(ref)
+    )
+    if differing_refs:
+        fail(
+            "Vane checkout tag refs do not exactly match AstroVela/vane: "
+            f"{differing_refs[0]}"
+        )
+
+
 def verify_ci_tools_checkout(ci_tools_source: Path, expected_sha: str) -> None:
     if not FULL_SHA_RE.fullmatch(expected_sha):
         fail("expected CI-tools SHA must be a full lowercase 40-character commit SHA")
@@ -354,6 +473,7 @@ def prepare_vane(vane_source: Path, manifest: ExtensionManifest) -> None:
         verify_vane_checkout(vane_source, manifest, require_complete_history=False)
         verify_official_vane_revision(manifest)
         unshallow_vane_checkout(vane_source, manifest)
+        fetch_official_vane_tags(vane_source)
         verify_vane_checkout(vane_source, manifest)
         return
 
@@ -369,6 +489,7 @@ def prepare_vane(vane_source: Path, manifest: ExtensionManifest) -> None:
         )
         run(["git", "fetch", "origin", manifest.vane_revision], cwd=staged_source)
         run(["git", "checkout", "--detach", "FETCH_HEAD"], cwd=staged_source)
+        fetch_official_vane_tags(staged_source)
         verify_vane_checkout(staged_source, manifest)
         publish_vane_checkout(staged_source, vane_source)
 
@@ -582,6 +703,295 @@ def run_native(
     run_selected_test(test_binary, manifest.native_test_selection, extension_root)
 
 
+def load_vane_default_build_extensions(vane_source: Path) -> tuple[str, ...]:
+    pyproject_path = vane_source / "pyproject.toml"
+    try:
+        with pyproject_path.open("rb") as handle:
+            pyproject = tomllib.load(handle)
+        value = pyproject["tool"]["scikit-build"]["cmake"]["define"][
+            "BUILD_EXTENSIONS"
+        ]
+    except (FileNotFoundError, KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
+        fail(f"Vane checkout has no valid wheel extension configuration: {exc}")
+
+    if not isinstance(value, str) or not value:
+        fail("Vane wheel BUILD_EXTENSIONS must be a non-empty string")
+    extensions: list[str] = []
+    for extension in value.split(";"):
+        if not NAME_RE.fullmatch(extension):
+            fail(f"Vane wheel contains a non-canonical extension name: {extension!r}")
+        if extension in extensions:
+            fail(f"Vane wheel contains a duplicate extension: {extension}")
+        extensions.append(extension)
+    return tuple(extensions)
+
+
+def write_vane_wheel_link_config(build_dir: Path, extension_name: str) -> Path:
+    config_path = build_dir / "vane-extension-link.cmake"
+    config_path.write_text(
+        "# Generated by vane-extension-ci-tools.\n"
+        "# Propagate the caller config's linked extensions back to Vane.\n"
+        "set(_VANE_LINKED_EXTENSIONS)\n"
+        "foreach(_VANE_EXTENSION_NAME IN LISTS DUCKDB_EXTENSION_NAMES)\n"
+        "  string(TOUPPER \"${_VANE_EXTENSION_NAME}\" _VANE_EXTENSION_UPPER)\n"
+        "  if(DUCKDB_EXTENSION_${_VANE_EXTENSION_UPPER}_SHOULD_LINK)\n"
+        "    list(APPEND _VANE_LINKED_EXTENSIONS \"${_VANE_EXTENSION_NAME}\")\n"
+        "  endif()\n"
+        "endforeach()\n"
+        f'list(FIND _VANE_LINKED_EXTENSIONS "{extension_name}" '
+        "_VANE_TARGET_INDEX)\n"
+        "if(_VANE_TARGET_INDEX EQUAL -1)\n"
+        f'  message(FATAL_ERROR "Caller config did not register {extension_name} '
+        'for static linking")\n'
+        "endif()\n"
+        'set(BUILD_EXTENSIONS "${_VANE_LINKED_EXTENSIONS}" PARENT_SCOPE)\n',
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def write_vane_wheel_dependency_prefix_config(
+    build_dir: Path, dependency_prefix: Path
+) -> Path:
+    config_path = build_dir / "vane-dependency-prefix.cmake"
+    config_path.write_text(
+        "# Generated by vane-extension-ci-tools.\n"
+        "# Keep the PEP 517 backend's package prefixes (including pybind11) "
+        "while adding the exact Vane dependency prefix.\n"
+        f'list(PREPEND CMAKE_PREFIX_PATH "{dependency_prefix}")\n',
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def require_vane_wheel_platform(target_triplet: str) -> None:
+    if (
+        sys.platform != "linux"
+        or os.uname().machine != "x86_64"
+        or ctypes.sizeof(ctypes.c_void_p) != 8
+        or target_triplet != "x64-linux"
+    ):
+        fail(
+            "Vane wheel builds require 64-bit x86 Linux and "
+            "VCPKG_TARGET_TRIPLET=x64-linux"
+        )
+
+
+def reject_duckdb_local_extension_config(vane_source: Path) -> None:
+    local_config = (
+        vane_source
+        / "external/duckdb/extension/extension_config_local.cmake"
+    )
+    if local_config.exists():
+        fail(
+            "Vane wheel builds reject DuckDB's ignored local extension config: "
+            f"{local_config}"
+        )
+
+
+def require_vane_wheel_dependency_prefix(
+    vane_source: Path, target_triplet: str
+) -> Path:
+    installed_value = os.environ.get("VANE_VCPKG_INSTALLED_DIR", "")
+    installed_root = (
+        Path(installed_value).resolve()
+        if installed_value
+        else vane_source / "vcpkg_installed"
+    )
+    prefix = installed_root / target_triplet
+    for relative in (
+        "share/arrow/ArrowConfig.cmake",
+        "share/arrowflight/ArrowFlightConfig.cmake",
+    ):
+        if not (prefix / relative).is_file():
+            fail(
+                "Vane wheel dependencies are incomplete; run the exact checkout's "
+                f"scripts/bootstrap_vcpkg.sh first: {prefix / relative}"
+            )
+    return prefix
+
+
+def verify_vane_wheel(
+    wheel_path: Path,
+    manifest: ExtensionManifest,
+    identity: VaneIdentity,
+    temporary_parent: Path,
+) -> None:
+    if not wheel_path.is_file():
+        fail(f"Vane wheel does not exist: {wheel_path}")
+    with tempfile.TemporaryDirectory(
+        prefix=".vane-wheel-verify-", dir=temporary_parent
+    ) as temporary:
+        environment_root = Path(temporary)
+        verification_environment = os.environ.copy()
+        for name in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"):
+            verification_environment.pop(name, None)
+        run(
+            [sys.executable, "-m", "venv", str(environment_root)],
+            env=verification_environment,
+        )
+        verification_python = environment_root / "bin/python"
+        run(
+            [
+                str(verification_python),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                str(wheel_path),
+            ],
+            env=verification_environment,
+        )
+        run(
+            [
+                str(verification_python),
+                "-I",
+                "-c",
+                VANE_WHEEL_VERIFY_SCRIPT,
+                manifest.name,
+                identity.fork_version,
+                identity.source_id,
+            ],
+            env=verification_environment,
+        )
+
+
+def build_vane_wheel(
+    extension_root: Path,
+    manifest: ExtensionManifest,
+    vane_source: Path,
+    build_dir: Path,
+    dist_dir: Path,
+    jobs: int,
+) -> Path:
+    target_triplet = os.environ.get("VCPKG_TARGET_TRIPLET", "x64-linux")
+    require_vane_wheel_platform(target_triplet)
+    reject_duckdb_local_extension_config(vane_source)
+    toolchain_value = os.environ.get("VCPKG_TOOLCHAIN_PATH", "")
+    toolchain = Path(toolchain_value).resolve() if toolchain_value else None
+    if toolchain is None or not toolchain.is_file():
+        fail("VCPKG_TOOLCHAIN_PATH must identify the vcpkg CMake toolchain")
+
+    identity = resolve_vane_identity(vane_source, manifest)
+    vane_dependency_prefix = require_vane_wheel_dependency_prefix(
+        vane_source, target_triplet
+    )
+    extension_config = resolve_within(
+        extension_root, manifest.extension_config, "extension_config"
+    )
+    build_dir = build_dir.resolve()
+    dist_dir = dist_dir.resolve()
+    build_dir.mkdir(parents=True, exist_ok=True)
+    dist_dir.mkdir(parents=True, exist_ok=True)
+    link_config = write_vane_wheel_link_config(build_dir, manifest.name)
+    dependency_prefix_config = write_vane_wheel_dependency_prefix_config(
+        build_dir, vane_dependency_prefix
+    )
+
+    build_extensions = [
+        extension
+        for extension in load_vane_default_build_extensions(vane_source)
+        if extension != manifest.name
+    ]
+    for extension in manifest.build_extensions:
+        if extension not in build_extensions:
+            build_extensions.append(extension)
+
+    cmake_args = [
+        "--fresh",
+        "-DBUILD_DISTRIBUTED_EXCHANGE=ON",
+        "-DENABLE_EXTENSION_AUTOLOADING=OFF",
+        "-DENABLE_EXTENSION_AUTOINSTALL=OFF",
+        "-DVCPKG_BUILD=ON",
+        f"-DCMAKE_TOOLCHAIN_FILE={toolchain}",
+        f"-DVCPKG_MANIFEST_DIR={extension_root}",
+        f"-DVCPKG_INSTALLED_DIR={build_dir / 'vcpkg_installed'}",
+        f"-DVCPKG_TARGET_TRIPLET={target_triplet}",
+        f"-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES={dependency_prefix_config}",
+        f"-DDUCKDB_EXTENSION_CONFIGS={extension_config};{link_config}",
+        f"-DBUILD_EXTENSIONS={';'.join(build_extensions)}",
+    ]
+    build_environment = os.environ.copy()
+    vcpkg_selection_variables = {
+        "VCPKG_CHAINLOAD_TOOLCHAIN_FILE",
+        "VCPKG_DEFAULT_HOST_TRIPLET",
+        "VCPKG_DEFAULT_TRIPLET",
+        "VCPKG_OVERLAY_PORTS",
+        "VCPKG_OVERLAY_TRIPLETS",
+    }
+    for name in tuple(build_environment):
+        if (
+            name in {
+                "CMAKE_ARGS",
+                "CMAKE_PREFIX_PATH",
+                "COVERAGE",
+                "DONT_LINK",
+                "GITHUB_BASE_REF",
+                "GITHUB_REF_NAME",
+                "VANE_CMAKE_PREFIX_PATH",
+                "VANE_VERSION_BRANCH",
+            }
+            or name in vcpkg_selection_variables
+            or name.startswith("SETUPTOOLS_SCM_PRETEND_VERSION")
+            or name.startswith("SKBUILD_")
+            or (name.startswith("DUCKDB_") and name.endswith("_DIRECTORY"))
+        ):
+            build_environment.pop(name)
+    build_environment.update(
+        {
+            "CMAKE_ARGS": shlex.join(cmake_args),
+            "CMAKE_BUILD_PARALLEL_LEVEL": str(jobs),
+            "CMAKE_GENERATOR": os.environ.get("VANE_CMAKE_GENERATOR", "Ninja"),
+            "SKBUILD_BUILD_DIR": str(build_dir),
+            "SKBUILD_CMAKE_BUILD_TYPE": "Release",
+            "VCPKG_MAX_CONCURRENCY": str(jobs),
+            "VCPKG_TARGET_TRIPLET": target_triplet,
+            "VCPKG_TOOLCHAIN_PATH": str(toolchain),
+        }
+    )
+    build_environment[f"DUCKDB_{manifest.name.upper()}_DIRECTORY"] = str(
+        extension_root
+    )
+    with tempfile.TemporaryDirectory(
+        prefix=".vane-wheel-output-", dir=dist_dir.parent
+    ) as temporary_output:
+        output_dir = Path(temporary_output)
+        run(
+            [
+                sys.executable,
+                "-m",
+                "build",
+                "--wheel",
+                "--no-isolation",
+                "--outdir",
+                str(output_dir),
+                str(vane_source),
+            ],
+            cwd=extension_root,
+            env=build_environment,
+        )
+
+        wheels = sorted(output_dir.glob("*.whl"))
+        if len(wheels) != 1:
+            fail(
+                "Vane wheel build must produce exactly one wheel in its "
+                "isolated output directory"
+            )
+        staged_wheel = wheels[0]
+        verify_vane_wheel(staged_wheel, manifest, identity, build_dir.parent)
+        stale_wheels = sorted(
+            path for path in dist_dir.glob("*.whl") if path.name != staged_wheel.name
+        )
+        if stale_wheels:
+            fail(
+                "Vane wheel dist directory contains a stale wheel with a different "
+                f"filename: {stale_wheels[0]}"
+            )
+        wheel_path = dist_dir / staged_wheel.name
+        os.replace(staged_wheel, wheel_path)
+        return wheel_path
+
+
 def manifest_outputs(
     manifest: ExtensionManifest, extension_root: Path
 ) -> dict[str, str]:
@@ -633,8 +1043,14 @@ def build_parser() -> argparse.ArgumentParser:
     native_parser = subparsers.add_parser("native")
     native_parser.add_argument("--vane-source", type=Path, required=True)
     native_parser.add_argument("--build-dir", type=Path, required=True)
-    native_parser.add_argument("--jobs", default="2")
+    native_parser.add_argument("--jobs", default="8")
     native_parser.add_argument("--skip-tests", action="store_true")
+
+    wheel_parser = subparsers.add_parser("wheel")
+    wheel_parser.add_argument("--vane-source", type=Path, required=True)
+    wheel_parser.add_argument("--build-dir", type=Path, required=True)
+    wheel_parser.add_argument("--dist-dir", type=Path, required=True)
+    wheel_parser.add_argument("--jobs", default="8")
     return parser
 
 
@@ -673,6 +1089,17 @@ def main() -> int:
             jobs,
             args.skip_tests,
         )
+    elif args.command == "wheel":
+        jobs = require_positive_int(args.jobs, "jobs")
+        wheel_path = build_vane_wheel(
+            extension_root,
+            manifest,
+            args.vane_source.resolve(),
+            args.build_dir,
+            args.dist_dir,
+            jobs,
+        )
+        print(wheel_path)
     return 0
 
 

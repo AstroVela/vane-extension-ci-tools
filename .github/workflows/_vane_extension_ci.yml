@@ -18,9 +18,9 @@ on:
         default: "3.12"
         type: string
       build_jobs:
-        description: Native compile parallelism
+        description: Native and wheel compile parallelism
         required: false
-        default: 2
+        default: 8
         type: number
       run_native_tests:
         description: Run the manifest's native DuckDB test selection
@@ -183,3 +183,135 @@ jobs:
             VANE_NATIVE_BUILD_DIR="$VANE_NATIVE_BUILD_DIR" \
             VANE_BUILD_JOBS="$VANE_BUILD_JOBS" \
             VANE_SKIP_NATIVE_TESTS="$VANE_SKIP_NATIVE_TESTS"
+
+  wheel:
+    name: Vane wheel with linked extension
+    needs: verify_workflow
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      VANE_EXTENSION_ROOT: ${{ github.workspace }}/extension
+      VANE_MANIFEST: ${{ github.workspace }}/extension/${{ inputs.manifest }}
+      VANE_SOURCE_DIR: ${{ github.workspace }}/vane
+      VANE_WHEEL_BUILD_DIR: ${{ github.workspace }}/build/vane-wheel
+      VANE_WHEEL_DIST_DIR: ${{ github.workspace }}/build/vane-wheel/dist
+      VANE_VCPKG_ROOT: ${{ github.workspace }}/vane-vcpkg
+      VANE_VCPKG_INSTALLED_DIR: ${{ github.workspace }}/vane/vcpkg_installed
+      VANE_BUILD_JOBS: ${{ inputs.build_jobs }}
+      VANE_CI_TOOLS_VERSION: ${{ inputs.ci_tools_version }}
+      VCPKG_TARGET_TRIPLET: x64-linux
+
+    steps:
+      - name: Checkout extension and submodules
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: extension
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify pinned Vane CI tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$VANE_CI_TOOLS_VERSION" =~ ^[0-9a-f]{40}$ ]]
+          actual="$(git -C extension/vane-extension-ci-tools rev-parse HEAD)"
+          test "$actual" = "$VANE_CI_TOOLS_VERSION"
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Read integration manifest
+        id: manifest
+        run: |
+          python extension/vane-extension-ci-tools/scripts/vane_extension.py \
+            --manifest "$VANE_MANIFEST" \
+            --extension-root "$VANE_EXTENSION_ROOT" \
+            manifest \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Checkout exact Vane source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ steps.manifest.outputs.vane_repository }}
+          ref: ${{ steps.manifest.outputs.vane_revision }}
+          path: vane
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate Vane identity
+        run: |
+          python extension/vane-extension-ci-tools/scripts/vane_extension.py \
+            --manifest "$VANE_MANIFEST" \
+            --extension-root "$VANE_EXTENSION_ROOT" \
+            identity \
+            --vane-source "$VANE_SOURCE_DIR"
+
+      - name: Install native build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf \
+            automake \
+            bison \
+            build-essential \
+            curl \
+            flex \
+            libtool \
+            ninja-build \
+            pkg-config \
+            tar \
+            unzip \
+            zip
+
+      - name: Install wheel build tools
+        run: >-
+          python -m pip install
+          build
+          "cmake>=3.29"
+          "ninja>=1.10"
+          "pybind11[global]>=3.0.0"
+          "scikit-build-core>=0.11.4"
+          "setuptools-scm>=9.2.0"
+
+      - name: Read extension vcpkg baseline
+        id: vcpkg
+        shell: bash
+        run: |
+          baseline="$(python -c 'import json; print(json.load(open("extension/vcpkg.json"))["builtin-baseline"])')"
+          [[ "$baseline" =~ ^[0-9a-f]{40}$ ]]
+          echo "baseline=$baseline" >> "$GITHUB_OUTPUT"
+
+      - name: Set up extension vcpkg
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11.6
+        with:
+          vcpkgGitCommitId: ${{ steps.vcpkg.outputs.baseline }}
+          vcpkgDirectory: ${{ github.workspace }}/vcpkg
+
+      - name: Build and verify extension-bearing Vane wheel
+        env:
+          VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+          VCPKG_MAX_CONCURRENCY: ${{ inputs.build_jobs }}
+        run: |
+          make -f extension/vane-extension-ci-tools/makefiles/vane_extension.Makefile \
+            vane_wheel \
+            VANE_EXTENSION_ROOT="$VANE_EXTENSION_ROOT" \
+            VANE_MANIFEST="$VANE_MANIFEST" \
+            VANE_SOURCE_DIR="$VANE_SOURCE_DIR" \
+            VANE_WHEEL_BUILD_DIR="$VANE_WHEEL_BUILD_DIR" \
+            VANE_WHEEL_DIST_DIR="$VANE_WHEEL_DIST_DIR" \
+            VANE_VCPKG_ROOT="$VANE_VCPKG_ROOT" \
+            VANE_VCPKG_INSTALLED_DIR="$VANE_VCPKG_INSTALLED_DIR" \
+            VANE_BUILD_JOBS="$VANE_BUILD_JOBS" \
+            VCPKG_TARGET_TRIPLET="$VCPKG_TARGET_TRIPLET"
+
+      - name: Upload verified Vane wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vane-${{ steps.manifest.outputs.extension_name }}-wheel
+          path: ${{ env.VANE_WHEEL_DIST_DIR }}/*.whl
+          if-no-files-found: error

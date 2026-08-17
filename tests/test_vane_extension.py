@@ -103,6 +103,18 @@ class ManifestTests(unittest.TestCase):
                 self.write_manifest(native_test_selection="--list-tests"), self.root
             )
 
+    def test_rejects_target_in_supporting_build_extensions(self) -> None:
+        path = self.write_manifest()
+        path.write_text(
+            path.read_text().replace(
+                '["httpfs", "parquet", "tpch"]', '["httpfs", "iceberg"]'
+            )
+        )
+        with self.assertRaisesRegex(
+            MODULE.ConfigurationError, "must not contain the target extension"
+        ):
+            MODULE.load_manifest(path, self.root)
+
 
 class IdentityTests(unittest.TestCase):
     def test_resolves_identity_from_exact_vane_checkout(self) -> None:
@@ -208,9 +220,11 @@ class VaneCheckoutTests(unittest.TestCase):
         (checkout / "DUCKDB_UPSTREAM_VERSION").write_text("v1.5.0\n")
         self.git(checkout, "add", ".")
         self.git(checkout, "commit", "-m", "add duckdb fork")
+        first_revision = self.git(checkout, "rev-parse", "HEAD", capture=True)
         (checkout / "README.md").write_text("fixture\n")
         self.git(checkout, "add", "README.md")
         self.git(checkout, "commit", "-m", "add README")
+        self.git(checkout, "tag", "v1.5.0", first_revision)
         revision = self.git(checkout, "rev-parse", "HEAD", capture=True)
 
         origin = root / "vane-origin.git"
@@ -258,6 +272,32 @@ class VaneCheckoutTests(unittest.TestCase):
             self.assertEqual(
                 self.git(vane_source, "rev-parse", "HEAD", capture=True), revision
             )
+            self.assertEqual(
+                self.git(
+                    vane_source,
+                    "rev-parse",
+                    "v1.5.0^{commit}",
+                    capture=True,
+                ),
+                self.git(vane_source, "rev-parse", "HEAD^", capture=True),
+            )
+
+    def test_prepare_rejects_non_official_local_vane_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            origin, revision = self.create_vane_origin(root)
+            vane_source = root / "vane-source"
+            with mock.patch.object(MODULE, "VANE_REPOSITORY_URL", origin.as_uri()):
+                MODULE.prepare_vane(vane_source, self.manifest(revision))
+
+            self.git(vane_source, "tag", "v9.9.9")
+            with (
+                mock.patch.object(MODULE, "VANE_REPOSITORY_URL", origin.as_uri()),
+                self.assertRaisesRegex(
+                    MODULE.ConfigurationError, "tag refs do not exactly match"
+                ),
+            ):
+                MODULE.prepare_vane(vane_source, self.manifest(revision))
 
     def test_prepare_failure_leaves_no_checkout_and_retry_succeeds(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -633,6 +673,331 @@ class ReusableWorkflowIdentityTests(unittest.TestCase):
             )
 
 
+class VaneWheelTests(unittest.TestCase):
+    @staticmethod
+    def manifest() -> object:
+        return MODULE.ExtensionManifest(
+            schema_version=1,
+            name="iceberg",
+            extension_config="extension_config.cmake",
+            build_extensions=("httpfs", "parquet"),
+            native_test_selection="test/",
+            vane_repository="AstroVela/vane",
+            vane_revision="a" * 40,
+        )
+
+    @staticmethod
+    def identity() -> object:
+        return MODULE.VaneIdentity(
+            source_id="b" * 40,
+            fork_version="v1.5.0-vane.aaaaaaaaaa",
+            upstream_version="v1.5.0",
+        )
+
+    def test_reads_exact_vane_wheel_extension_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            vane_source = Path(temporary_directory)
+            (vane_source / "pyproject.toml").write_text(
+                "[tool.scikit-build.cmake.define]\n"
+                'BUILD_EXTENSIONS = "core_functions;json;parquet;icu;httpfs"\n'
+            )
+
+            self.assertEqual(
+                MODULE.load_vane_default_build_extensions(vane_source),
+                ("core_functions", "json", "parquet", "icu", "httpfs"),
+            )
+
+    def test_rejects_duplicate_vane_wheel_extension_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            vane_source = Path(temporary_directory)
+            (vane_source / "pyproject.toml").write_text(
+                "[tool.scikit-build.cmake.define]\n"
+                'BUILD_EXTENSIONS = "core_functions;json;json"\n'
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ConfigurationError, "duplicate extension"
+            ):
+                MODULE.load_vane_default_build_extensions(vane_source)
+
+    def test_generated_link_config_preserves_caller_link_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config = MODULE.write_vane_wheel_link_config(
+                Path(temporary_directory), "iceberg"
+            )
+            contents = config.read_text()
+
+            self.assertIn("IN LISTS DUCKDB_EXTENSION_NAMES", contents)
+            self.assertIn("_SHOULD_LINK", contents)
+            self.assertIn(
+                'set(BUILD_EXTENSIONS "${_VANE_LINKED_EXTENSIONS}" PARENT_SCOPE)',
+                contents,
+            )
+            self.assertIn(
+                "Caller config did not register iceberg for static linking", contents
+            )
+
+    def test_generated_dependency_prefix_keeps_backend_prefixes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prefix = root / "vane-installed/x64-linux"
+            config = MODULE.write_vane_wheel_dependency_prefix_config(root, prefix)
+
+            self.assertEqual(config.name, "vane-dependency-prefix.cmake")
+            self.assertIn(
+                f'list(PREPEND CMAKE_PREFIX_PATH "{prefix}")', config.read_text()
+            )
+
+    def test_wheel_platform_has_no_non_x64_fallback(self) -> None:
+        with (
+            mock.patch.object(MODULE.sys, "platform", "linux"),
+            mock.patch.object(
+                MODULE.os,
+                "uname",
+                return_value=mock.Mock(machine="aarch64"),
+            ),
+            self.assertRaisesRegex(
+                MODULE.ConfigurationError, "require 64-bit x86 Linux"
+            ),
+        ):
+            MODULE.require_vane_wheel_platform("x64-linux")
+
+        with self.assertRaisesRegex(
+            MODULE.ConfigurationError, "VCPKG_TARGET_TRIPLET=x64-linux"
+        ):
+            MODULE.require_vane_wheel_platform("arm64-linux")
+
+    def test_requires_vane_arrow_flight_dependency_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            arrow_config = (
+                root
+                / "installed/x64-linux/share/arrow/ArrowConfig.cmake"
+            )
+            arrow_config.parent.mkdir(parents=True)
+            arrow_config.write_text("# fixture\n")
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"VANE_VCPKG_INSTALLED_DIR": str(root / "installed")},
+                    clear=True,
+                ),
+                self.assertRaisesRegex(
+                    MODULE.ConfigurationError, "ArrowFlightConfig.cmake"
+                ),
+            ):
+                MODULE.require_vane_wheel_dependency_prefix(
+                    root / "vane", "x64-linux"
+                )
+
+    def test_rejects_ignored_duckdb_local_extension_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            vane_source = Path(temporary_directory)
+            local_config = (
+                vane_source
+                / "external/duckdb/extension/extension_config_local.cmake"
+            )
+            local_config.parent.mkdir(parents=True)
+            local_config.write_text("# ambient fixture\n")
+
+            with self.assertRaisesRegex(
+                MODULE.ConfigurationError, "ignored local extension config"
+            ):
+                MODULE.reject_duckdb_local_extension_config(vane_source)
+
+    def test_builds_and_verifies_wheel_with_caller_extension_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            extension_root = root / "extension"
+            extension_root.mkdir()
+            extension_config = extension_root / "extension_config.cmake"
+            extension_config.write_text("# fixture\n")
+            vane_source = root / "vane"
+            vane_source.mkdir()
+            (vane_source / "pyproject.toml").write_text(
+                "[tool.scikit-build.cmake.define]\n"
+                'BUILD_EXTENSIONS = "core_functions;json;iceberg;httpfs"\n'
+            )
+            installed_root = root / "vane-installed"
+            for relative in (
+                "share/arrow/ArrowConfig.cmake",
+                "share/arrowflight/ArrowFlightConfig.cmake",
+            ):
+                dependency = installed_root / "x64-linux" / relative
+                dependency.parent.mkdir(parents=True, exist_ok=True)
+                dependency.write_text("# fixture\n")
+            toolchain = root / "vcpkg/scripts/buildsystems/vcpkg.cmake"
+            toolchain.parent.mkdir(parents=True)
+            toolchain.write_text("# fixture\n")
+            build_dir = root / "build/vane-wheel"
+            dist_dir = build_dir / "dist"
+            calls: list[tuple[list[str], Path | None, dict[str, str] | None]] = []
+
+            def fake_run(
+                command: list[str],
+                *,
+                cwd: Path | None = None,
+                capture: bool = False,
+                env: dict[str, str] | None = None,
+            ) -> str:
+                del capture
+                calls.append((command, cwd, env))
+                if command[1:3] == ["-m", "build"]:
+                    output_dir = Path(command[command.index("--outdir") + 1])
+                    fixture_wheel = (
+                        output_dir
+                        / "vane_ai-1.5.0-cp312-cp312-linux_x86_64.whl"
+                    )
+                    fixture_wheel.write_bytes(b"fixture")
+                return ""
+
+            identity = self.identity()
+            manifest = self.manifest()
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "VCPKG_TOOLCHAIN_PATH": str(toolchain),
+                        "VCPKG_TARGET_TRIPLET": "x64-linux",
+                        "VANE_VCPKG_INSTALLED_DIR": str(installed_root),
+                        "CMAKE_PREFIX_PATH": "/ambient/prefix",
+                        "SKBUILD_CMAKE_DEFINE": "BUILD_EXTENSIONS=ambient",
+                        "VANE_CMAKE_PREFIX_PATH": "/ambient/vane-prefix",
+                        "DONT_LINK": "1",
+                        "DUCKDB_HTTPFS_DIRECTORY": "/ambient/httpfs",
+                        "DUCKDB_ICEBERG_DIRECTORY": "/ambient/iceberg",
+                        "VCPKG_OVERLAY_PORTS": "/ambient/ports",
+                        "COVERAGE": "true",
+                        "GITHUB_BASE_REF": "release/9.9",
+                        "GITHUB_REF_NAME": "extension-branch",
+                        "VANE_VERSION_BRANCH": "release/9.9",
+                        "SETUPTOOLS_SCM_PRETEND_VERSION": "99.0.0",
+                    },
+                    clear=True,
+                ),
+                mock.patch.object(
+                    MODULE, "resolve_vane_identity", return_value=identity
+                ),
+                mock.patch.object(MODULE, "run", side_effect=fake_run),
+                mock.patch.object(MODULE, "verify_vane_wheel") as verify_wheel,
+            ):
+                wheel = MODULE.build_vane_wheel(
+                    extension_root,
+                    manifest,
+                    vane_source,
+                    build_dir,
+                    dist_dir,
+                    jobs=12,
+                )
+
+            self.assertEqual(
+                wheel,
+                dist_dir / "vane_ai-1.5.0-cp312-cp312-linux_x86_64.whl",
+            )
+            self.assertEqual(len(calls), 1)
+            command, cwd, environment = calls[0]
+            self.assertEqual(command[1:4], ["-m", "build", "--wheel"])
+            self.assertEqual(command[-1], str(vane_source))
+            self.assertNotEqual(
+                Path(command[command.index("--outdir") + 1]), dist_dir
+            )
+            self.assertEqual(cwd, extension_root)
+            assert environment is not None
+            cmake_args = MODULE.shlex.split(environment["CMAKE_ARGS"])
+            self.assertIn("--fresh", cmake_args)
+            self.assertIn("-DBUILD_DISTRIBUTED_EXCHANGE=ON", cmake_args)
+            self.assertIn("-DENABLE_EXTENSION_AUTOINSTALL=OFF", cmake_args)
+            self.assertIn(
+                f"-DDUCKDB_EXTENSION_CONFIGS={extension_config};"
+                f"{build_dir / 'vane-extension-link.cmake'}",
+                cmake_args,
+            )
+            self.assertIn(
+                "-DBUILD_EXTENSIONS=core_functions;json;httpfs;parquet",
+                cmake_args,
+            )
+            self.assertIn(
+                "-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES="
+                f"{build_dir / 'vane-dependency-prefix.cmake'}",
+                cmake_args,
+            )
+            self.assertNotIn(
+                f"-DCMAKE_PREFIX_PATH={installed_root / 'x64-linux'}", cmake_args
+            )
+            self.assertFalse(
+                any("ambient" in argument for argument in cmake_args), cmake_args
+            )
+            self.assertEqual(environment["CMAKE_BUILD_PARALLEL_LEVEL"], "12")
+            self.assertEqual(environment["VCPKG_MAX_CONCURRENCY"], "12")
+            self.assertEqual(environment["VCPKG_TARGET_TRIPLET"], "x64-linux")
+            self.assertEqual(environment["VCPKG_TOOLCHAIN_PATH"], str(toolchain))
+            self.assertNotIn("CMAKE_PREFIX_PATH", environment)
+            self.assertNotIn("COVERAGE", environment)
+            self.assertNotIn("GITHUB_BASE_REF", environment)
+            self.assertNotIn("GITHUB_REF_NAME", environment)
+            self.assertNotIn("VANE_VERSION_BRANCH", environment)
+            self.assertNotIn("SETUPTOOLS_SCM_PRETEND_VERSION", environment)
+            self.assertNotIn("SKBUILD_CMAKE_DEFINE", environment)
+            self.assertNotIn("VANE_CMAKE_PREFIX_PATH", environment)
+            self.assertNotIn("DONT_LINK", environment)
+            self.assertNotIn("DUCKDB_HTTPFS_DIRECTORY", environment)
+            self.assertNotIn("VCPKG_OVERLAY_PORTS", environment)
+            self.assertEqual(
+                environment["DUCKDB_ICEBERG_DIRECTORY"], str(extension_root)
+            )
+            verify_wheel.assert_called_once()
+            verified_wheel, verified_manifest, verified_identity, temporary_parent = (
+                verify_wheel.call_args.args
+            )
+            self.assertEqual(verified_wheel.name, wheel.name)
+            self.assertNotEqual(verified_wheel, wheel)
+            self.assertEqual(verified_manifest, manifest)
+            self.assertEqual(verified_identity, identity)
+            self.assertEqual(temporary_parent, build_dir.parent)
+
+    def test_verification_loads_static_extension_without_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            wheel = root / "vane_ai.whl"
+            wheel.write_bytes(b"fixture")
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "PYTHONHOME": "/unsafe/home",
+                        "PYTHONPATH": "/unsafe/path",
+                        "VIRTUAL_ENV": "/unsafe/venv",
+                    },
+                    clear=True,
+                ),
+                mock.patch.object(MODULE, "run") as run_command,
+            ):
+                MODULE.verify_vane_wheel(
+                    wheel,
+                    self.manifest(),
+                    self.identity(),
+                    root,
+                )
+
+            self.assertEqual(run_command.call_count, 3)
+            for call in run_command.call_args_list:
+                environment = call.kwargs["env"]
+                self.assertNotIn("PYTHONHOME", environment)
+                self.assertNotIn("PYTHONPATH", environment)
+                self.assertNotIn("VIRTUAL_ENV", environment)
+            install_command = run_command.call_args_list[1].args[0]
+            self.assertEqual(install_command[1:4], ["-m", "pip", "install"])
+            self.assertEqual(install_command[-1], str(wheel))
+            verification_call = run_command.call_args_list[2]
+            verification_command = verification_call.args[0]
+            self.assertEqual(verification_command[1:3], ["-I", "-c"])
+            self.assertIn("LOAD {extension_name}", verification_command[3])
+            self.assertNotIn("INSTALL ", verification_command[3])
+            self.assertIn("STATICALLY_LINKED", verification_command[3])
+            self.assertIn("expected_source_id[:10]", verification_command[3])
+
+
 class WorkflowContractTests(unittest.TestCase):
     def test_reusable_workflow_example_grants_caller_oidc_permission(self) -> None:
         readme = (Path(__file__).parents[1] / "README.md").read_text()
@@ -665,6 +1030,35 @@ class WorkflowContractTests(unittest.TestCase):
         ).read_text()
         self.assertIn('rev-parse "HEAD:vane-extension-ci-tools"', makefile)
         self.assertIn("vane_validate: vane_verify_ci_tools", makefile)
+
+    def test_wheel_lane_is_read_only_and_uploads_verified_artifact(self) -> None:
+        workflow = (
+            Path(__file__).parents[1] / ".github/workflows/_vane_extension_ci.yml"
+        ).read_text()
+        _, wheel_job = workflow.split("  wheel:\n", 1)
+        self.assertIn("needs: verify_workflow", wheel_job)
+        self.assertIn("permissions:\n      contents: read", wheel_job)
+        self.assertNotIn("id-token: write", wheel_job)
+        self.assertIn("vane_wheel", wheel_job)
+        self.assertIn("VCPKG_MAX_CONCURRENCY", wheel_job)
+        self.assertIn(
+            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+            wheel_job,
+        )
+
+    def test_local_wheel_target_bootstraps_exact_vane_dependencies(self) -> None:
+        makefile = (
+            Path(__file__).parents[1] / "makefiles/vane_extension.Makefile"
+        ).read_text()
+        self.assertIn("vane_wheel: vane_wheel_dependencies", makefile)
+        self.assertIn(
+            'bash "$(VANE_SOURCE_DIR)/scripts/bootstrap_vcpkg.sh"', makefile
+        )
+        self.assertEqual(
+            makefile.count('VCPKG_MAX_CONCURRENCY="$(VANE_BUILD_JOBS)"'), 2
+        )
+        self.assertIn('test "$$(uname -m)" = "x86_64"', makefile)
+        self.assertIn('test "$$(getconf LONG_BIT)" = "64"', makefile)
 
     def test_make_passes_committed_ci_tools_gitlink_as_expected_sha(self) -> None:
         expected_sha = "a" * 40
