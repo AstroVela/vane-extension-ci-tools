@@ -92,17 +92,22 @@ its `vane-extension-ci-tools` submodule:
 ```yaml
 jobs:
   vane-native:
+    # Reusable workflows cannot elevate this permission from the caller.
+    permissions:
+      contents: read
+      id-token: write
     uses: AstroVela/vane-extension-ci-tools/.github/workflows/_vane_extension_ci.yml@TOOLS_COMMIT_SHA
     with:
       ci_tools_version: TOOLS_COMMIT_SHA
       manifest: vane-extension.toml
 ```
 
-The workflow verifies the caller's submodule pin and uses GitHub's signed OIDC
-claims to verify that the reusable workflow itself was invoked at that same
-commit SHA before executing repository code. It has read-only repository access,
-uses no deployment secrets, and requests an OIDC token only for this identity
-attestation.
+The caller must grant `id-token: write`: a reusable workflow cannot elevate
+permissions inherited from its caller. The workflow verifies the caller's
+submodule pin and uses GitHub's signed OIDC claims to verify that the reusable
+workflow itself was invoked at that same commit SHA before executing repository
+code. It has read-only repository access, uses no deployment secrets, and
+requests an OIDC token only for this identity attestation.
 
 ## Development
 

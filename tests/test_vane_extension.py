@@ -331,6 +331,16 @@ class ReusableWorkflowIdentityTests(unittest.TestCase):
             )
 
 
+class DocumentationTests(unittest.TestCase):
+    def test_reusable_workflow_example_grants_caller_oidc_permission(self) -> None:
+        readme = (Path(__file__).parents[1] / "README.md").read_text()
+        self.assertIn("id-token: write", readme)
+        self.assertIn(
+            "Reusable workflows cannot elevate this permission from the caller.",
+            readme,
+        )
+
+
 class NativeTestOutputTests(unittest.TestCase):
     def test_accepts_executed_test_output(self) -> None:
         MODULE.verify_selected_test_output("All tests passed (144 assertions)\n")
