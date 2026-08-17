@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
+import errno
 import json
 import os
 import re
@@ -309,6 +311,37 @@ def unshallow_vane_checkout(vane_source: Path, manifest: ExtensionManifest) -> N
         )
 
 
+def publish_vane_checkout(staged_source: Path, vane_source: Path) -> None:
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except (AttributeError, OSError):
+        fail("atomic Vane checkout publication requires Linux renameat2")
+
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    result = renameat2(
+        -100,  # AT_FDCWD
+        os.fsencode(staged_source),
+        -100,  # AT_FDCWD
+        os.fsencode(vane_source),
+        1,  # RENAME_NOREPLACE
+    )
+    if result == 0:
+        return
+
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        fail(f"Vane source appeared during preparation: {vane_source}")
+    raise OSError(error_number, os.strerror(error_number), vane_source)
+
+
 def prepare_vane(vane_source: Path, manifest: ExtensionManifest) -> None:
     if os.path.lexists(vane_source):
         if not (vane_source / ".git").exists():
@@ -332,9 +365,7 @@ def prepare_vane(vane_source: Path, manifest: ExtensionManifest) -> None:
         run(["git", "fetch", "origin", manifest.vane_revision], cwd=staged_source)
         run(["git", "checkout", "--detach", "FETCH_HEAD"], cwd=staged_source)
         verify_vane_checkout(staged_source, manifest)
-        if os.path.lexists(vane_source):
-            fail(f"Vane source appeared during preparation: {vane_source}")
-        staged_source.rename(vane_source)
+        publish_vane_checkout(staged_source, vane_source)
 
 
 def decode_jwt_claims(token: str) -> dict[str, object]:

@@ -306,7 +306,9 @@ class VaneCheckoutTests(unittest.TestCase):
 
             self.assertTrue(vane_source.is_symlink())
 
-    def test_prepare_does_not_replace_destination_created_while_fetching(self) -> None:
+    def test_prepare_does_not_replace_destination_created_during_preparation(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             origin, revision = self.create_vane_origin(root)
@@ -342,6 +344,25 @@ class VaneCheckoutTests(unittest.TestCase):
             self.assertTrue(vane_source.is_dir())
             self.assertEqual(list(vane_source.iterdir()), [])
             self.assertEqual(list(root.glob(".vane-source.prepare-*")), [])
+
+    def test_publish_has_no_non_atomic_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            staged_source = root / "staged-source"
+            staged_source.mkdir()
+            (staged_source / "marker").write_text("verified\n")
+            vane_source = root / "vane-source"
+
+            with (
+                mock.patch.object(MODULE.ctypes, "CDLL", return_value=object()),
+                self.assertRaisesRegex(
+                    MODULE.ConfigurationError, "requires Linux renameat2"
+                ),
+            ):
+                MODULE.publish_vane_checkout(staged_source, vane_source)
+
+            self.assertTrue((staged_source / "marker").is_file())
+            self.assertFalse(os.path.lexists(vane_source))
 
     def test_prepare_unshallows_existing_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
