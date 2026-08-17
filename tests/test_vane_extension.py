@@ -339,6 +339,63 @@ class VaneCheckoutTests(unittest.TestCase):
                     MODULE.prepare_vane(vane_source, self.manifest(fork_revision))
 
 
+class CIToolsCheckoutTests(unittest.TestCase):
+    @staticmethod
+    def git(directory: Path, *args: str, capture: bool = False) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=directory,
+            check=True,
+            capture_output=capture,
+            text=True,
+        )
+        return result.stdout.strip() if capture else ""
+
+    def create_ci_tools_origin(self, root: Path) -> tuple[Path, Path, str]:
+        checkout = root / "ci-tools-checkout"
+        checkout.mkdir()
+        self.git(checkout, "init")
+        self.git(checkout, "config", "user.email", "fixture@example.com")
+        self.git(checkout, "config", "user.name", "Fixture")
+        (checkout / "scripts").mkdir()
+        (checkout / "scripts/vane_extension.py").write_text("# fixture\n")
+        self.git(checkout, "add", ".")
+        self.git(checkout, "commit", "-m", "add CI tools")
+        revision = self.git(checkout, "rev-parse", "HEAD", capture=True)
+
+        origin = root / "ci-tools-origin.git"
+        subprocess.run(
+            ["git", "clone", "--bare", str(checkout), str(origin)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return checkout, origin, revision
+
+    def test_accepts_clean_expected_official_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            checkout, origin, revision = self.create_ci_tools_origin(
+                Path(temporary_directory)
+            )
+            with mock.patch.object(MODULE, "CI_TOOLS_REPOSITORY_URL", origin.as_uri()):
+                MODULE.verify_ci_tools_checkout(checkout, revision)
+
+    def test_rejects_mismatched_ci_tools_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            checkout, _, _ = self.create_ci_tools_origin(Path(temporary_directory))
+            with self.assertRaisesRegex(MODULE.ConfigurationError, "revision mismatch"):
+                MODULE.verify_ci_tools_checkout(checkout, "b" * 40)
+
+    def test_rejects_dirty_ci_tools_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            checkout, _, revision = self.create_ci_tools_origin(
+                Path(temporary_directory)
+            )
+            (checkout / "scripts/vane_extension.py").write_text("# dirty\n")
+            with self.assertRaisesRegex(MODULE.ConfigurationError, "working-tree"):
+                MODULE.verify_ci_tools_checkout(checkout, revision)
+
+
 class ReusableWorkflowIdentityTests(unittest.TestCase):
     @staticmethod
     def token(claims: dict[str, object]) -> str:
@@ -444,6 +501,62 @@ class WorkflowContractTests(unittest.TestCase):
         ).read_text()
         self.assertIn("VANE_CI_TOOLS_VERSION: ${{ inputs.ci_tools_version }}", workflow)
         self.assertNotIn('"${{ inputs.ci_tools_version }}"', workflow)
+
+    def test_local_targets_verify_committed_ci_tools_gitlink(self) -> None:
+        makefile = (
+            Path(__file__).parents[1] / "makefiles/vane_extension.Makefile"
+        ).read_text()
+        self.assertIn('rev-parse "HEAD:vane-extension-ci-tools"', makefile)
+        self.assertIn("vane_validate: vane_verify_ci_tools", makefile)
+
+    def test_make_passes_committed_ci_tools_gitlink_as_expected_sha(self) -> None:
+        expected_sha = "a" * 40
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            extension_root = Path(temporary_directory)
+            subprocess.run(["git", "init"], cwd=extension_root, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "fixture@example.com"],
+                cwd=extension_root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Fixture"],
+                cwd=extension_root,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    f"160000,{expected_sha},vane-extension-ci-tools",
+                ],
+                cwd=extension_root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "pin CI tools"],
+                cwd=extension_root,
+                check=True,
+                capture_output=True,
+            )
+
+            makefile = Path(__file__).parents[1] / "makefiles/vane_extension.Makefile"
+            result = subprocess.run(
+                [
+                    "make",
+                    "--just-print",
+                    "--file",
+                    str(makefile),
+                    "vane_verify_ci_tools",
+                    f"VANE_EXTENSION_ROOT={extension_root}",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn(f'--expected-sha "{expected_sha}"', result.stdout)
 
 
 class NativeTestOutputTests(unittest.TestCase):

@@ -28,6 +28,7 @@ FORK_VERSION_RE = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+-vane\.[0-9a-f]{10}")
 VANE_REPOSITORY = "AstroVela/vane"
 VANE_REPOSITORY_URL = f"https://github.com/{VANE_REPOSITORY}.git"
 CI_TOOLS_REPOSITORY = "AstroVela/vane-extension-ci-tools"
+CI_TOOLS_REPOSITORY_URL = f"https://github.com/{CI_TOOLS_REPOSITORY}.git"
 CI_TOOLS_WORKFLOW_PATH = ".github/workflows/_vane_extension_ci.yml"
 OIDC_AUDIENCE = "vane-extension-ci-tools"
 
@@ -213,8 +214,13 @@ def verify_vane_checkout(
         fail(f"Vane checkout returned an invalid shallow-repository state: {shallow!r}")
 
 
-def verify_official_vane_revision(manifest: ExtensionManifest) -> None:
-    with tempfile.TemporaryDirectory(prefix="vane-official-revision-") as temporary:
+def verify_official_revision(
+    repository: str,
+    repository_url: str,
+    revision: str,
+    label: str,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="official-revision-") as temporary:
         verification_repository = Path(temporary) / "repository.git"
         run(["git", "init", "--bare", "--quiet", str(verification_repository)])
         try:
@@ -227,27 +233,59 @@ def verify_official_vane_revision(manifest: ExtensionManifest) -> None:
                     "--no-tags",
                     "--depth=1",
                     "--filter=tree:0",
-                    VANE_REPOSITORY_URL,
-                    manifest.vane_revision,
+                    repository_url,
+                    revision,
                 ],
                 cwd=verification_repository,
             )
         except subprocess.CalledProcessError:
-            fail(
-                f"Vane revision is not available from {VANE_REPOSITORY}: "
-                f"{manifest.vane_revision}"
-            )
+            fail(f"{label} revision is not available from {repository}: {revision}")
 
         fetched_revision = run(
             ["git", "rev-parse", "FETCH_HEAD^{commit}"],
             cwd=verification_repository,
             capture=True,
         )
-        if fetched_revision != manifest.vane_revision:
+        if fetched_revision != revision:
             fail(
-                "official Vane fetch returned an unexpected revision: "
-                f"expected {manifest.vane_revision}, got {fetched_revision}"
+                f"official {label} fetch returned an unexpected revision: "
+                f"expected {revision}, got {fetched_revision}"
             )
+
+
+def verify_official_vane_revision(manifest: ExtensionManifest) -> None:
+    verify_official_revision(
+        VANE_REPOSITORY,
+        VANE_REPOSITORY_URL,
+        manifest.vane_revision,
+        "Vane",
+    )
+
+
+def verify_ci_tools_checkout(ci_tools_source: Path, expected_sha: str) -> None:
+    if not FULL_SHA_RE.fullmatch(expected_sha):
+        fail("expected CI-tools SHA must be a full lowercase 40-character commit SHA")
+    if not (ci_tools_source / "scripts/vane_extension.py").is_file():
+        fail(
+            f"CI-tools checkout is missing scripts/vane_extension.py: {ci_tools_source}"
+        )
+
+    actual_sha = run(["git", "rev-parse", "HEAD"], cwd=ci_tools_source, capture=True)
+    if actual_sha != expected_sha:
+        fail(
+            "CI-tools checkout revision mismatch: "
+            f"expected {expected_sha}, got {actual_sha}"
+        )
+    status = run(["git", "status", "--porcelain"], cwd=ci_tools_source, capture=True)
+    if status:
+        fail(f"CI-tools checkout contains working-tree changes: {ci_tools_source}")
+
+    verify_official_revision(
+        CI_TOOLS_REPOSITORY,
+        CI_TOOLS_REPOSITORY_URL,
+        expected_sha,
+        "CI-tools",
+    )
 
 
 def unshallow_vane_checkout(vane_source: Path, manifest: ExtensionManifest) -> None:
@@ -542,6 +580,10 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_parser = subparsers.add_parser("verify-reusable-workflow")
     workflow_parser.add_argument("--expected-sha", required=True)
 
+    ci_tools_parser = subparsers.add_parser("verify-ci-tools")
+    ci_tools_parser.add_argument("--ci-tools-source", type=Path, required=True)
+    ci_tools_parser.add_argument("--expected-sha", required=True)
+
     native_parser = subparsers.add_parser("native")
     native_parser.add_argument("--vane-source", type=Path, required=True)
     native_parser.add_argument("--build-dir", type=Path, required=True)
@@ -573,6 +615,8 @@ def main() -> int:
         verify_reusable_workflow_identity(
             fetch_reusable_workflow_oidc_token(), args.expected_sha
         )
+    elif args.command == "verify-ci-tools":
+        verify_ci_tools_checkout(args.ci_tools_source.resolve(), args.expected_sha)
     elif args.command == "native":
         jobs = require_positive_int(args.jobs, "jobs")
         run_native(

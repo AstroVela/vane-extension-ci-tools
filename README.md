@@ -16,6 +16,9 @@ Vane-only integration layer.
   no DuckDB mirror or alternate fork is accepted.
 - Every build pins a full Vane commit SHA. Branch names, tags, `main`, version
   guesses, and runtime fallbacks are rejected.
+- Local Make targets read the exact CI-tools SHA from the extension repository's
+  committed `vane-extension-ci-tools` gitlink, then require this checkout to be
+  clean, at that revision, and available from the official repository.
 - DuckDB's content-derived SourceID and Vane fork version are obtained through
   the scripts in the selected Vane checkout.
 - The standard DuckDB extension targets are not replaced. All Make targets
@@ -48,8 +51,8 @@ include extension-ci-tools/makefiles/duckdb_extension.Makefile
 include vane-extension-ci-tools/makefiles/vane_extension.Makefile
 ```
 
-The second include only defines `vane_validate`, `vane_prepare`,
-`vane_identity`, `vane_native`, and `vane_ci`.
+The second include only defines `vane_verify_ci_tools`, `vane_validate`,
+`vane_prepare`, `vane_identity`, `vane_native`, and `vane_ci`.
 
 ## Manifest
 
@@ -69,6 +72,12 @@ Set the vcpkg toolchain used by the extension, then run:
 export VCPKG_TOOLCHAIN_PATH=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake
 make vane_ci
 ```
+
+Before validation or source preparation, `vane_verify_ci_tools` compares this
+checkout with the exact submodule gitlink committed in the extension's `HEAD`.
+It rejects a different revision, working-tree changes, a missing gitlink, and
+commits unavailable from the official `AstroVela/vane-extension-ci-tools`
+repository.
 
 `vane_prepare` clones the exact manifest revision into `build/vane-source` with
 the complete Git history required by Vane's identity resolver. If that checkout
