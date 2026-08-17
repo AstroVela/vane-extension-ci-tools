@@ -11,9 +11,9 @@ Vane-only integration layer.
 
 ## Contract
 
-- Vane is the only source of the distributed DuckDB fork. The tools check out
-  `AstroVela/vane` and build against `external/duckdb`; no DuckDB mirror is
-  required.
+- `AstroVela/vane` is the only accepted source of the distributed DuckDB fork.
+  The tools check out its exact revision and build against `external/duckdb`;
+  no DuckDB mirror or alternate fork is accepted.
 - Every build pins a full Vane commit SHA. Branch names, tags, `main`, version
   guesses, and runtime fallbacks are rejected.
 - DuckDB's content-derived SourceID and Vane fork version are obtained through
@@ -70,9 +70,10 @@ export VCPKG_TOOLCHAIN_PATH=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake
 make vane_ci
 ```
 
-`vane_prepare` clones the exact manifest revision into
-`build/vane-source`. If that checkout already exists, it must be clean and at
-the exact revision; the tools never reset or clean it implicitly.
+`vane_prepare` clones the exact manifest revision into `build/vane-source` with
+the complete Git history required by Vane's identity resolver. If that checkout
+already exists, it must be clean and at the exact revision; a shallow checkout
+is safely unshallowed, but the tools never reset or clean working-tree changes.
 
 Override generated locations without changing the manifest:
 
@@ -97,9 +98,11 @@ jobs:
       manifest: vane-extension.toml
 ```
 
-The workflow verifies that both references match before executing repository
-code. It requires read-only repository access and receives no deployment
-secrets.
+The workflow verifies the caller's submodule pin and uses GitHub's signed OIDC
+claims to verify that the reusable workflow itself was invoked at that same
+commit SHA before executing repository code. It has read-only repository access,
+uses no deployment secrets, and requests an OIDC token only for this identity
+attestation.
 
 ## Development
 

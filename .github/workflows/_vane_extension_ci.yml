@@ -30,6 +30,9 @@ on:
 
 permissions:
   contents: read
+  # GitHub-signed OIDC claims attest to the immutable reusable-workflow SHA.
+  # This grants no repository write access and is not used for deployment.
+  id-token: write
 
 jobs:
   native:
@@ -52,6 +55,11 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ inputs.python_version }}
+
       - name: Verify pinned Vane CI tools
         shell: bash
         run: |
@@ -60,10 +68,15 @@ jobs:
           actual="$(git -C extension/vane-extension-ci-tools rev-parse HEAD)"
           test "$actual" = "${{ inputs.ci_tools_version }}"
 
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: ${{ inputs.python_version }}
+      - name: Verify pinned reusable workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          python extension/vane-extension-ci-tools/scripts/vane_extension.py \
+            --manifest "$VANE_MANIFEST" \
+            --extension-root "$VANE_EXTENSION_ROOT" \
+            verify-reusable-workflow \
+            --expected-sha "${{ inputs.ci_tools_version }}"
 
       - name: Install CMake and Ninja
         run: python -m pip install "cmake>=3.29" "ninja>=1.10"

@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -20,8 +23,12 @@ SCHEMA_VERSION = 1
 FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 SOURCE_ID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
-REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 FORK_VERSION_RE = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+-vane\.[0-9a-f]{10}")
+VANE_REPOSITORY = "AstroVela/vane"
+VANE_REPOSITORY_URL = f"https://github.com/{VANE_REPOSITORY}.git"
+CI_TOOLS_REPOSITORY = "AstroVela/vane-extension-ci-tools"
+CI_TOOLS_WORKFLOW_PATH = ".github/workflows/_vane_extension_ci.yml"
+OIDC_AUDIENCE = "vane-extension-ci-tools"
 
 
 class ConfigurationError(RuntimeError):
@@ -136,8 +143,8 @@ def load_manifest(manifest_path: Path, extension_root: Path) -> ExtensionManifes
     if not isinstance(vane_raw, dict):
         fail("vane must be a table")
     vane_repository = require_string(vane_raw, "repository", "vane.repository")
-    if not REPOSITORY_RE.fullmatch(vane_repository):
-        fail(f"vane.repository must use owner/repository form: {vane_repository}")
+    if vane_repository != VANE_REPOSITORY:
+        fail(f"vane.repository must be {VANE_REPOSITORY}: {vane_repository}")
     vane_revision = require_string(vane_raw, "revision", "vane.revision")
     if not FULL_SHA_RE.fullmatch(vane_revision):
         fail("vane.revision must be a full lowercase 40-character commit SHA")
@@ -155,7 +162,12 @@ def load_manifest(manifest_path: Path, extension_root: Path) -> ExtensionManifes
     )
 
 
-def verify_vane_checkout(vane_source: Path, manifest: ExtensionManifest) -> None:
+def verify_vane_checkout(
+    vane_source: Path,
+    manifest: ExtensionManifest,
+    *,
+    require_complete_history: bool = True,
+) -> None:
     if not (vane_source / "external/duckdb/CMakeLists.txt").is_file():
         fail(f"Vane checkout is missing external/duckdb: {vane_source}")
     for relative in (
@@ -175,25 +187,113 @@ def verify_vane_checkout(vane_source: Path, manifest: ExtensionManifest) -> None
     status = run(["git", "status", "--porcelain"], cwd=vane_source, capture=True)
     if status:
         fail(f"Vane checkout contains tracked changes: {vane_source}")
+    if not require_complete_history:
+        return
+    shallow = run(
+        ["git", "rev-parse", "--is-shallow-repository"],
+        cwd=vane_source,
+        capture=True,
+    )
+    if shallow == "true":
+        fail(
+            "Vane checkout has incomplete Git history; rerun vane_prepare to fetch "
+            "the complete history required for Vane identity resolution"
+        )
+    if shallow != "false":
+        fail(f"Vane checkout returned an invalid shallow-repository state: {shallow!r}")
+
+
+def unshallow_vane_checkout(vane_source: Path, manifest: ExtensionManifest) -> None:
+    shallow = run(
+        ["git", "rev-parse", "--is-shallow-repository"],
+        cwd=vane_source,
+        capture=True,
+    )
+    if shallow == "false":
+        return
+    if shallow != "true":
+        fail(f"Vane checkout returned an invalid shallow-repository state: {shallow!r}")
+    run(
+        ["git", "fetch", "--unshallow", "origin", manifest.vane_revision],
+        cwd=vane_source,
+    )
 
 
 def prepare_vane(vane_source: Path, manifest: ExtensionManifest) -> None:
     if vane_source.exists():
         if not (vane_source / ".git").exists():
             fail(f"existing Vane source is not a Git checkout: {vane_source}")
+        verify_vane_checkout(vane_source, manifest, require_complete_history=False)
+        unshallow_vane_checkout(vane_source, manifest)
         verify_vane_checkout(vane_source, manifest)
         return
 
     vane_source.parent.mkdir(parents=True, exist_ok=True)
-    repository_url = f"https://github.com/{manifest.vane_repository}.git"
     run(["git", "init", str(vane_source)])
-    run(["git", "remote", "add", "origin", repository_url], cwd=vane_source)
-    run(
-        ["git", "fetch", "--depth", "1", "origin", manifest.vane_revision],
-        cwd=vane_source,
-    )
+    run(["git", "remote", "add", "origin", VANE_REPOSITORY_URL], cwd=vane_source)
+    run(["git", "fetch", "origin", manifest.vane_revision], cwd=vane_source)
     run(["git", "checkout", "--detach", "FETCH_HEAD"], cwd=vane_source)
     verify_vane_checkout(vane_source, manifest)
+
+
+def decode_jwt_claims(token: str) -> dict[str, object]:
+    parts = token.split(".")
+    if len(parts) != 3:
+        fail("GitHub OIDC token is not a JWT")
+    payload = parts[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(payload + padding)
+        claims = json.loads(decoded)
+    except (UnicodeDecodeError, ValueError) as exc:
+        fail(f"GitHub OIDC token payload is invalid: {exc}")
+    if not isinstance(claims, dict):
+        fail("GitHub OIDC token payload is not an object")
+    return claims
+
+
+def verify_reusable_workflow_identity(token: str, expected_sha: str) -> None:
+    if not FULL_SHA_RE.fullmatch(expected_sha):
+        fail(
+            "expected reusable workflow SHA must be a full lowercase 40-character commit SHA"
+        )
+    claims = decode_jwt_claims(token)
+    expected_ref = f"{CI_TOOLS_REPOSITORY}/{CI_TOOLS_WORKFLOW_PATH}@{expected_sha}"
+    if claims.get("job_workflow_ref") != expected_ref:
+        fail(
+            "reusable workflow ref mismatch: "
+            f"expected {expected_ref}, got {claims.get('job_workflow_ref')!r}"
+        )
+    if claims.get("job_workflow_sha") != expected_sha:
+        fail(
+            "reusable workflow SHA mismatch: "
+            f"expected {expected_sha}, got {claims.get('job_workflow_sha')!r}"
+        )
+
+
+def fetch_reusable_workflow_oidc_token() -> str:
+    request_url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+    request_token = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+    if not request_url or not request_token:
+        fail(
+            "GitHub OIDC token environment is unavailable for reusable workflow verification"
+        )
+    separator = "&" if "?" in request_url else "?"
+    url = (
+        f"{request_url}{separator}{urllib.parse.urlencode({'audience': OIDC_AUDIENCE})}"
+    )
+    request = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {request_token}"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            payload = json.load(response)
+    except OSError as exc:
+        fail(f"could not request GitHub OIDC token: {exc}")
+    token = payload.get("value") if isinstance(payload, dict) else None
+    if not isinstance(token, str) or not token:
+        fail("GitHub OIDC response did not contain a token")
+    return token
 
 
 def resolve_vane_identity(
@@ -379,6 +479,9 @@ def build_parser() -> argparse.ArgumentParser:
     identity_parser.add_argument("--vane-source", type=Path, required=True)
     identity_parser.add_argument("--github-output", type=Path)
 
+    workflow_parser = subparsers.add_parser("verify-reusable-workflow")
+    workflow_parser.add_argument("--expected-sha", required=True)
+
     native_parser = subparsers.add_parser("native")
     native_parser.add_argument("--vane-source", type=Path, required=True)
     native_parser.add_argument("--build-dir", type=Path, required=True)
@@ -406,6 +509,10 @@ def main() -> int:
         if args.github_output:
             write_github_outputs(args.github_output, values)
         print(json.dumps(values, indent=2, sort_keys=True))
+    elif args.command == "verify-reusable-workflow":
+        verify_reusable_workflow_identity(
+            fetch_reusable_workflow_oidc_token(), args.expected_sha
+        )
     elif args.command == "native":
         jobs = require_positive_int(args.jobs, "jobs")
         run_native(
