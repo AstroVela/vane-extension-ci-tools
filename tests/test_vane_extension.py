@@ -673,6 +673,82 @@ class ReusableWorkflowIdentityTests(unittest.TestCase):
             )
 
 
+class VaneNativeTests(unittest.TestCase):
+    @staticmethod
+    def manifest() -> object:
+        return MODULE.ExtensionManifest(
+            schema_version=1,
+            name="iceberg",
+            extension_config="extension_config.cmake",
+            build_extensions=("httpfs", "parquet"),
+            native_test_selection="test/",
+            vane_repository="AstroVela/vane",
+            vane_revision="a" * 40,
+        )
+
+    @staticmethod
+    def identity() -> object:
+        return MODULE.VaneIdentity(
+            source_id="b" * 40,
+            fork_version="v1.5.0-vane.aaaaaaaaaa",
+            upstream_version="v1.5.0",
+        )
+
+    def test_native_build_uses_the_exact_vane_duckdb_source_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            extension_root = root / "extension"
+            extension_root.mkdir()
+            extension_config = extension_root / "extension_config.cmake"
+            extension_config.write_text("# fixture\n")
+            vane_source = root / "vane"
+            duckdb_source = vane_source / "external/duckdb"
+            duckdb_source.mkdir(parents=True)
+            toolchain = root / "vcpkg/scripts/buildsystems/vcpkg.cmake"
+            toolchain.parent.mkdir(parents=True)
+            toolchain.write_text("# fixture\n")
+            calls: list[tuple[list[str], Path | None]] = []
+
+            def fake_run(
+                command: list[str], *, cwd: Path | None = None, **_: object
+            ) -> str:
+                calls.append((command, cwd))
+                return ""
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "VCPKG_TOOLCHAIN_PATH": str(toolchain),
+                        "VCPKG_TARGET_TRIPLET": "x64-linux",
+                    },
+                    clear=True,
+                ),
+                mock.patch.object(
+                    MODULE, "resolve_vane_identity", return_value=self.identity()
+                ),
+                mock.patch.object(MODULE, "run", side_effect=fake_run),
+            ):
+                MODULE.run_native(
+                    extension_root,
+                    self.manifest(),
+                    vane_source,
+                    root / "build",
+                    jobs=12,
+                    skip_tests=True,
+                )
+
+            self.assertEqual(len(calls), 2)
+            cmake_command, configure_cwd = calls[0]
+            self.assertEqual(cmake_command[0:3], ["cmake", "--fresh", "-S"])
+            self.assertEqual(cmake_command[3], str(duckdb_source))
+            self.assertIn(f"-DDUCKDB_SOURCE_PATH={duckdb_source}", cmake_command)
+            self.assertIn(
+                f"-DDUCKDB_EXTENSION_CONFIGS={extension_config}", cmake_command
+            )
+            self.assertEqual(configure_cwd, extension_root)
+
+
 class VaneWheelTests(unittest.TestCase):
     @staticmethod
     def manifest() -> object:

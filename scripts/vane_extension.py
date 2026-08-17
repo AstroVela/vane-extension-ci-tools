@@ -642,6 +642,7 @@ def run_native(
     extension_config = resolve_within(
         extension_root, manifest.extension_config, "extension_config"
     )
+    duckdb_source = vane_source / "external/duckdb"
     build_dir = build_dir.resolve()
     build_dir.mkdir(parents=True, exist_ok=True)
 
@@ -649,7 +650,7 @@ def run_native(
         "cmake",
         "--fresh",
         "-S",
-        str(vane_source / "external/duckdb"),
+        str(duckdb_source),
         "-B",
         str(build_dir),
         "-G",
@@ -664,6 +665,7 @@ def run_native(
         "-DEXTENSION_STATIC_BUILD=ON",
         "-DENABLE_EXTENSION_AUTOLOADING=OFF",
         "-DENABLE_EXTENSION_AUTOINSTALL=OFF",
+        f"-DDUCKDB_SOURCE_PATH={duckdb_source}",
         f"-DDUCKDB_EXTENSION_CONFIGS={extension_config}",
         f"-DBUILD_EXTENSIONS={manifest.build_extensions_cmake}",
         f"-DUNITTEST_ROOT_DIRECTORY={extension_root}",
