@@ -1,0 +1,185 @@
+name: Vane extension CI
+
+on:
+  workflow_call:
+    inputs:
+      ci_tools_version:
+        description: Exact commit used by the caller's vane-extension-ci-tools submodule
+        required: true
+        type: string
+      manifest:
+        description: Manifest path relative to the extension repository
+        required: false
+        default: vane-extension.toml
+        type: string
+      python_version:
+        description: Python used for orchestration
+        required: false
+        default: "3.12"
+        type: string
+      build_jobs:
+        description: Native compile parallelism
+        required: false
+        default: 2
+        type: number
+      run_native_tests:
+        description: Run the manifest's native DuckDB test selection
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  verify_workflow:
+    name: Verify pinned Vane CI workflow
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # GitHub-signed OIDC claims attest to the immutable reusable-workflow SHA.
+      id-token: write
+    env:
+      VANE_EXTENSION_ROOT: ${{ github.workspace }}/extension
+      VANE_MANIFEST: ${{ github.workspace }}/extension/${{ inputs.manifest }}
+      VANE_CI_TOOLS_VERSION: ${{ inputs.ci_tools_version }}
+
+    steps:
+      - name: Checkout extension without submodules
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: extension
+          persist-credentials: false
+
+      - name: Verify caller CI-tools pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$VANE_CI_TOOLS_VERSION" =~ ^[0-9a-f]{40}$ ]]
+          entry="$(git -C extension ls-tree HEAD -- vane-extension-ci-tools)"
+          read -r mode type actual path <<< "$entry"
+          test "$mode" = "160000"
+          test "$type" = "commit"
+          test "$path" = "vane-extension-ci-tools"
+          test "$actual" = "$VANE_CI_TOOLS_VERSION"
+
+      - name: Checkout exact official Vane CI tools
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: AstroVela/vane-extension-ci-tools
+          ref: ${{ inputs.ci_tools_version }}
+          path: ci-tools
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Verify pinned reusable workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git -C ci-tools rev-parse HEAD)"
+          test "$actual" = "$VANE_CI_TOOLS_VERSION"
+          python ci-tools/scripts/vane_extension.py \
+            --manifest "$VANE_MANIFEST" \
+            --extension-root "$VANE_EXTENSION_ROOT" \
+            verify-reusable-workflow \
+            --expected-sha "$VANE_CI_TOOLS_VERSION"
+
+  native:
+    name: Vane DuckDB native extension
+    needs: verify_workflow
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      VANE_EXTENSION_ROOT: ${{ github.workspace }}/extension
+      VANE_MANIFEST: ${{ github.workspace }}/extension/${{ inputs.manifest }}
+      VANE_SOURCE_DIR: ${{ github.workspace }}/vane
+      VANE_NATIVE_BUILD_DIR: ${{ github.workspace }}/build/vane-native
+      VANE_BUILD_JOBS: ${{ inputs.build_jobs }}
+      VANE_CI_TOOLS_VERSION: ${{ inputs.ci_tools_version }}
+      VCPKG_TARGET_TRIPLET: x64-linux
+
+    steps:
+      - name: Checkout extension and submodules
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: extension
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify pinned Vane CI tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$VANE_CI_TOOLS_VERSION" =~ ^[0-9a-f]{40}$ ]]
+          actual="$(git -C extension/vane-extension-ci-tools rev-parse HEAD)"
+          test "$actual" = "$VANE_CI_TOOLS_VERSION"
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Read integration manifest
+        id: manifest
+        run: |
+          python extension/vane-extension-ci-tools/scripts/vane_extension.py \
+            --manifest "$VANE_MANIFEST" \
+            --extension-root "$VANE_EXTENSION_ROOT" \
+            manifest \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Checkout exact Vane source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ steps.manifest.outputs.vane_repository }}
+          ref: ${{ steps.manifest.outputs.vane_revision }}
+          path: vane
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate Vane identity
+        run: |
+          python extension/vane-extension-ci-tools/scripts/vane_extension.py \
+            --manifest "$VANE_MANIFEST" \
+            --extension-root "$VANE_EXTENSION_ROOT" \
+            identity \
+            --vane-source "$VANE_SOURCE_DIR"
+
+      - name: Install CMake and Ninja
+        run: python -m pip install "cmake>=3.29" "ninja>=1.10"
+
+      - name: Read vcpkg baseline
+        id: vcpkg
+        shell: bash
+        run: |
+          baseline="$(python -c 'import json; print(json.load(open("extension/vcpkg.json"))["builtin-baseline"])')"
+          [[ "$baseline" =~ ^[0-9a-f]{40}$ ]]
+          echo "baseline=$baseline" >> "$GITHUB_OUTPUT"
+
+      - name: Set up vcpkg
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11.6
+        with:
+          vcpkgGitCommitId: ${{ steps.vcpkg.outputs.baseline }}
+          vcpkgDirectory: ${{ github.workspace }}/vcpkg
+
+      - name: Build and test extension against Vane DuckDB
+        env:
+          VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+          VANE_SKIP_NATIVE_TESTS: ${{ inputs.run_native_tests && '0' || '1' }}
+        run: |
+          make -f extension/vane-extension-ci-tools/makefiles/vane_extension.Makefile \
+            vane_ci \
+            VANE_EXTENSION_ROOT="$VANE_EXTENSION_ROOT" \
+            VANE_MANIFEST="$VANE_MANIFEST" \
+            VANE_SOURCE_DIR="$VANE_SOURCE_DIR" \
+            VANE_NATIVE_BUILD_DIR="$VANE_NATIVE_BUILD_DIR" \
+            VANE_BUILD_JOBS="$VANE_BUILD_JOBS" \
+            VANE_SKIP_NATIVE_TESTS="$VANE_SKIP_NATIVE_TESTS"
