@@ -310,7 +310,7 @@ def unshallow_vane_checkout(vane_source: Path, manifest: ExtensionManifest) -> N
 
 
 def prepare_vane(vane_source: Path, manifest: ExtensionManifest) -> None:
-    if vane_source.exists():
+    if os.path.lexists(vane_source):
         if not (vane_source / ".git").exists():
             fail(f"existing Vane source is not a Git checkout: {vane_source}")
         verify_vane_checkout(vane_source, manifest, require_complete_history=False)
@@ -320,11 +320,21 @@ def prepare_vane(vane_source: Path, manifest: ExtensionManifest) -> None:
         return
 
     vane_source.parent.mkdir(parents=True, exist_ok=True)
-    run(["git", "init", str(vane_source)])
-    run(["git", "remote", "add", "origin", VANE_REPOSITORY_URL], cwd=vane_source)
-    run(["git", "fetch", "origin", manifest.vane_revision], cwd=vane_source)
-    run(["git", "checkout", "--detach", "FETCH_HEAD"], cwd=vane_source)
-    verify_vane_checkout(vane_source, manifest)
+    with tempfile.TemporaryDirectory(
+        prefix=f".{vane_source.name}.prepare-", dir=vane_source.parent
+    ) as temporary:
+        staged_source = Path(temporary) / "source"
+        run(["git", "init", str(staged_source)])
+        run(
+            ["git", "remote", "add", "origin", VANE_REPOSITORY_URL],
+            cwd=staged_source,
+        )
+        run(["git", "fetch", "origin", manifest.vane_revision], cwd=staged_source)
+        run(["git", "checkout", "--detach", "FETCH_HEAD"], cwd=staged_source)
+        verify_vane_checkout(staged_source, manifest)
+        if os.path.lexists(vane_source):
+            fail(f"Vane source appeared during preparation: {vane_source}")
+        staged_source.rename(vane_source)
 
 
 def decode_jwt_claims(token: str) -> dict[str, object]:

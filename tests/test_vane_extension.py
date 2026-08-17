@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -257,6 +258,90 @@ class VaneCheckoutTests(unittest.TestCase):
             self.assertEqual(
                 self.git(vane_source, "rev-parse", "HEAD", capture=True), revision
             )
+
+    def test_prepare_failure_leaves_no_checkout_and_retry_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            origin, revision = self.create_vane_origin(root)
+            vane_source = root / "vane-source"
+            original_run = MODULE.run
+
+            def fail_fetch(
+                command: list[str],
+                *,
+                cwd: Path | None = None,
+                capture: bool = False,
+            ) -> str:
+                if command[:3] == ["git", "fetch", "origin"]:
+                    raise subprocess.CalledProcessError(1, command)
+                return original_run(command, cwd=cwd, capture=capture)
+
+            with (
+                mock.patch.object(MODULE, "VANE_REPOSITORY_URL", origin.as_uri()),
+                mock.patch.object(MODULE, "run", side_effect=fail_fetch),
+                self.assertRaises(subprocess.CalledProcessError),
+            ):
+                MODULE.prepare_vane(vane_source, self.manifest(revision))
+
+            self.assertFalse(os.path.lexists(vane_source))
+            self.assertEqual(list(root.glob(".vane-source.prepare-*")), [])
+
+            with mock.patch.object(MODULE, "VANE_REPOSITORY_URL", origin.as_uri()):
+                MODULE.prepare_vane(vane_source, self.manifest(revision))
+
+            self.assertEqual(
+                self.git(vane_source, "rev-parse", "HEAD", capture=True), revision
+            )
+
+    def test_prepare_does_not_replace_dangling_destination_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            vane_source = root / "vane-source"
+            vane_source.symlink_to(root / "missing-source", target_is_directory=True)
+
+            with self.assertRaisesRegex(
+                MODULE.ConfigurationError, "existing Vane source is not a Git checkout"
+            ):
+                MODULE.prepare_vane(vane_source, self.manifest("a" * 40))
+
+            self.assertTrue(vane_source.is_symlink())
+
+    def test_prepare_does_not_replace_destination_created_while_fetching(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            origin, revision = self.create_vane_origin(root)
+            vane_source = root / "vane-source"
+            original_verify = MODULE.verify_vane_checkout
+
+            def create_destination_after_verify(
+                checkout: Path,
+                manifest: object,
+                *,
+                require_complete_history: bool = True,
+            ) -> None:
+                original_verify(
+                    checkout,
+                    manifest,
+                    require_complete_history=require_complete_history,
+                )
+                vane_source.mkdir()
+
+            with (
+                mock.patch.object(MODULE, "VANE_REPOSITORY_URL", origin.as_uri()),
+                mock.patch.object(
+                    MODULE,
+                    "verify_vane_checkout",
+                    side_effect=create_destination_after_verify,
+                ),
+                self.assertRaisesRegex(
+                    MODULE.ConfigurationError, "appeared during preparation"
+                ),
+            ):
+                MODULE.prepare_vane(vane_source, self.manifest(revision))
+
+            self.assertTrue(vane_source.is_dir())
+            self.assertEqual(list(vane_source.iterdir()), [])
+            self.assertEqual(list(root.glob(".vane-source.prepare-*")), [])
 
     def test_prepare_unshallows_existing_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
