@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
+import errno
 import json
 import os
 import re
@@ -31,6 +33,7 @@ CI_TOOLS_REPOSITORY = "AstroVela/vane-extension-ci-tools"
 CI_TOOLS_REPOSITORY_URL = f"https://github.com/{CI_TOOLS_REPOSITORY}.git"
 CI_TOOLS_WORKFLOW_PATH = ".github/workflows/_vane_extension_ci.yml"
 OIDC_AUDIENCE = "vane-extension-ci-tools"
+LINUX_X86_64_RENAMEAT2_SYSCALL = 316
 
 
 class ConfigurationError(RuntimeError):
@@ -309,8 +312,43 @@ def unshallow_vane_checkout(vane_source: Path, manifest: ExtensionManifest) -> N
         )
 
 
+def publish_vane_checkout(staged_source: Path, vane_source: Path) -> None:
+    if (
+        sys.platform != "linux"
+        or os.uname().machine != "x86_64"
+        or ctypes.sizeof(ctypes.c_void_p) != 8
+    ):
+        fail("atomic Vane checkout publication requires 64-bit x86 Linux renameat2")
+
+    try:
+        syscall = ctypes.CDLL(None, use_errno=True).syscall
+    except (AttributeError, OSError):
+        fail("atomic Vane checkout publication requires the Linux syscall interface")
+
+    syscall.argtypes = [ctypes.c_long]
+    syscall.restype = ctypes.c_long
+    ctypes.set_errno(0)
+    result = syscall(
+        LINUX_X86_64_RENAMEAT2_SYSCALL,
+        ctypes.c_int(-100),  # AT_FDCWD
+        ctypes.c_char_p(os.fsencode(staged_source)),
+        ctypes.c_int(-100),  # AT_FDCWD
+        ctypes.c_char_p(os.fsencode(vane_source)),
+        ctypes.c_uint(1),  # RENAME_NOREPLACE
+    )
+    if result == 0:
+        return
+
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        fail(f"Vane source appeared during preparation: {vane_source}")
+    if error_number == errno.ENOSYS:
+        fail("atomic Vane checkout publication requires Linux renameat2 support")
+    raise OSError(error_number, os.strerror(error_number), vane_source)
+
+
 def prepare_vane(vane_source: Path, manifest: ExtensionManifest) -> None:
-    if vane_source.exists():
+    if os.path.lexists(vane_source):
         if not (vane_source / ".git").exists():
             fail(f"existing Vane source is not a Git checkout: {vane_source}")
         verify_vane_checkout(vane_source, manifest, require_complete_history=False)
@@ -320,11 +358,19 @@ def prepare_vane(vane_source: Path, manifest: ExtensionManifest) -> None:
         return
 
     vane_source.parent.mkdir(parents=True, exist_ok=True)
-    run(["git", "init", str(vane_source)])
-    run(["git", "remote", "add", "origin", VANE_REPOSITORY_URL], cwd=vane_source)
-    run(["git", "fetch", "origin", manifest.vane_revision], cwd=vane_source)
-    run(["git", "checkout", "--detach", "FETCH_HEAD"], cwd=vane_source)
-    verify_vane_checkout(vane_source, manifest)
+    with tempfile.TemporaryDirectory(
+        prefix=f".{vane_source.name}.prepare-", dir=vane_source.parent
+    ) as temporary:
+        staged_source = Path(temporary) / "source"
+        run(["git", "init", str(staged_source)])
+        run(
+            ["git", "remote", "add", "origin", VANE_REPOSITORY_URL],
+            cwd=staged_source,
+        )
+        run(["git", "fetch", "origin", manifest.vane_revision], cwd=staged_source)
+        run(["git", "checkout", "--detach", "FETCH_HEAD"], cwd=staged_source)
+        verify_vane_checkout(staged_source, manifest)
+        publish_vane_checkout(staged_source, vane_source)
 
 
 def decode_jwt_claims(token: str) -> dict[str, object]:
