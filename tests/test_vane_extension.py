@@ -279,7 +279,8 @@ class VaneCheckoutTests(unittest.TestCase):
                 "true",
             )
 
-            MODULE.prepare_vane(vane_source, self.manifest(revision))
+            with mock.patch.object(MODULE, "VANE_REPOSITORY_URL", origin.as_uri()):
+                MODULE.prepare_vane(vane_source, self.manifest(revision))
 
             self.assertEqual(
                 self.git(
@@ -290,6 +291,52 @@ class VaneCheckoutTests(unittest.TestCase):
                 ),
                 "false",
             )
+
+    def test_prepare_verifies_existing_checkout_against_official_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            origin, revision = self.create_vane_origin(root)
+            vane_source = root / "vane-source"
+            subprocess.run(
+                ["git", "clone", origin.as_uri(), str(vane_source)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            with mock.patch.object(MODULE, "VANE_REPOSITORY_URL", origin.as_uri()):
+                MODULE.prepare_vane(vane_source, self.manifest(revision))
+
+            self.assertEqual(
+                self.git(vane_source, "rev-parse", "HEAD", capture=True),
+                revision,
+            )
+
+    def test_prepare_rejects_fork_only_existing_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            official_origin, _ = self.create_vane_origin(root)
+            vane_source = root / "vane-source"
+            subprocess.run(
+                ["git", "clone", official_origin.as_uri(), str(vane_source)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.git(vane_source, "config", "user.email", "fixture@example.com")
+            self.git(vane_source, "config", "user.name", "Fixture")
+            (vane_source / "FORK_ONLY.md").write_text("fork-only\n")
+            self.git(vane_source, "add", "FORK_ONLY.md")
+            self.git(vane_source, "commit", "-m", "fork-only commit")
+            fork_revision = self.git(vane_source, "rev-parse", "HEAD", capture=True)
+
+            with mock.patch.object(
+                MODULE, "VANE_REPOSITORY_URL", official_origin.as_uri()
+            ):
+                with self.assertRaisesRegex(
+                    MODULE.ConfigurationError, "not available from AstroVela/vane"
+                ):
+                    MODULE.prepare_vane(vane_source, self.manifest(fork_revision))
 
 
 class ReusableWorkflowIdentityTests(unittest.TestCase):

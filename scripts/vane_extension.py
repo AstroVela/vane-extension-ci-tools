@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 import urllib.request
 from collections.abc import Sequence
@@ -212,20 +213,62 @@ def verify_vane_checkout(
         fail(f"Vane checkout returned an invalid shallow-repository state: {shallow!r}")
 
 
+def verify_official_vane_revision(manifest: ExtensionManifest) -> None:
+    with tempfile.TemporaryDirectory(prefix="vane-official-revision-") as temporary:
+        verification_repository = Path(temporary) / "repository.git"
+        run(["git", "init", "--bare", "--quiet", str(verification_repository)])
+        try:
+            run(
+                [
+                    "git",
+                    "-c",
+                    "protocol.version=2",
+                    "fetch",
+                    "--no-tags",
+                    "--depth=1",
+                    "--filter=tree:0",
+                    VANE_REPOSITORY_URL,
+                    manifest.vane_revision,
+                ],
+                cwd=verification_repository,
+            )
+        except subprocess.CalledProcessError:
+            fail(
+                f"Vane revision is not available from {VANE_REPOSITORY}: "
+                f"{manifest.vane_revision}"
+            )
+
+        fetched_revision = run(
+            ["git", "rev-parse", "FETCH_HEAD^{commit}"],
+            cwd=verification_repository,
+            capture=True,
+        )
+        if fetched_revision != manifest.vane_revision:
+            fail(
+                "official Vane fetch returned an unexpected revision: "
+                f"expected {manifest.vane_revision}, got {fetched_revision}"
+            )
+
+
 def unshallow_vane_checkout(vane_source: Path, manifest: ExtensionManifest) -> None:
     shallow = run(
         ["git", "rev-parse", "--is-shallow-repository"],
         cwd=vane_source,
         capture=True,
     )
-    if shallow == "false":
-        return
-    if shallow != "true":
+    if shallow not in {"true", "false"}:
         fail(f"Vane checkout returned an invalid shallow-repository state: {shallow!r}")
-    run(
-        ["git", "fetch", "--unshallow", "origin", manifest.vane_revision],
-        cwd=vane_source,
-    )
+    if shallow == "true":
+        run(
+            [
+                "git",
+                "fetch",
+                "--unshallow",
+                VANE_REPOSITORY_URL,
+                manifest.vane_revision,
+            ],
+            cwd=vane_source,
+        )
 
 
 def prepare_vane(vane_source: Path, manifest: ExtensionManifest) -> None:
@@ -233,6 +276,7 @@ def prepare_vane(vane_source: Path, manifest: ExtensionManifest) -> None:
         if not (vane_source / ".git").exists():
             fail(f"existing Vane source is not a Git checkout: {vane_source}")
         verify_vane_checkout(vane_source, manifest, require_complete_history=False)
+        verify_official_vane_revision(manifest)
         unshallow_vane_checkout(vane_source, manifest)
         verify_vane_checkout(vane_source, manifest)
         return

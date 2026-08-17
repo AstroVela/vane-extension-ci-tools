@@ -73,7 +73,10 @@ make vane_ci
 `vane_prepare` clones the exact manifest revision into `build/vane-source` with
 the complete Git history required by Vane's identity resolver. If that checkout
 already exists, it must be clean and at the exact revision; a shallow checkout
-is safely unshallowed, but the tools never reset or clean working-tree changes.
+is safely unshallowed. Existing checkouts are always verified by fetching the
+exact revision directly from the hard-coded official `AstroVela/vane` URL; a
+different `origin` cannot substitute a fork-only commit. The tools never reset
+or clean working-tree changes.
 
 Override generated locations without changing the manifest:
 
