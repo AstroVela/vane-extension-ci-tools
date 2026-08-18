@@ -531,6 +531,18 @@ def require_positive_int(value: str, label: str) -> int:
     return parsed
 
 
+def cmake_compiler_launcher_args() -> list[str]:
+    launcher = os.environ.get("VANE_CMAKE_COMPILER_LAUNCHER")
+    if launcher is None:
+        return []
+    if launcher != "ccache":
+        fail("VANE_CMAKE_COMPILER_LAUNCHER must be ccache")
+    return [
+        "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
+        "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
+    ]
+
+
 def verify_selected_test_output(output: str) -> None:
     if "All tests were skipped" in output:
         fail("selected native test did not execute: all test cases were skipped")
@@ -608,6 +620,7 @@ def run_native(
         f"-DDUCKDB_EXPLICIT_VERSION={identity.fork_version}",
         f"-DGIT_COMMIT_HASH={identity.source_id[:10]}",
     ]
+    cmake_command.extend(cmake_compiler_launcher_args())
     prefix_path = os.environ.get("VANE_CMAKE_PREFIX_PATH")
     if prefix_path:
         cmake_command.append(f"-DCMAKE_PREFIX_PATH={prefix_path}")
@@ -843,6 +856,7 @@ def build_vane_wheel(
         f"-DDUCKDB_EXTENSION_CONFIGS={extension_config};{link_config}",
         f"-DBUILD_EXTENSIONS={';'.join(build_extensions)}",
     ]
+    cmake_args.extend(cmake_compiler_launcher_args())
     build_environment = os.environ.copy()
     vcpkg_selection_variables = {
         "VCPKG_CHAINLOAD_TOOLCHAIN_FILE",
@@ -861,6 +875,7 @@ def build_vane_wheel(
                 "GITHUB_BASE_REF",
                 "GITHUB_REF_NAME",
                 "VANE_CMAKE_PREFIX_PATH",
+                "VANE_CMAKE_COMPILER_LAUNCHER",
                 "VANE_VERSION_BRANCH",
             }
             or name in vcpkg_selection_variables

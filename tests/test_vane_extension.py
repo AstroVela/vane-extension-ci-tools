@@ -640,6 +640,7 @@ class VaneNativeTests(unittest.TestCase):
                     {
                         "VCPKG_TOOLCHAIN_PATH": str(toolchain),
                         "VCPKG_TARGET_TRIPLET": "x64-linux",
+                        "VANE_CMAKE_COMPILER_LAUNCHER": "ccache",
                     },
                     clear=True,
                 ),
@@ -665,7 +666,21 @@ class VaneNativeTests(unittest.TestCase):
             self.assertIn(
                 f"-DDUCKDB_EXTENSION_CONFIGS={extension_config}", cmake_command
             )
+            self.assertIn("-DCMAKE_C_COMPILER_LAUNCHER=ccache", cmake_command)
+            self.assertIn("-DCMAKE_CXX_COMPILER_LAUNCHER=ccache", cmake_command)
             self.assertEqual(configure_cwd, extension_root)
+
+    def test_rejects_non_ccache_compiler_launcher(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"VANE_CMAKE_COMPILER_LAUNCHER": "sccache"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                MODULE.ConfigurationError,
+                "VANE_CMAKE_COMPILER_LAUNCHER must be ccache",
+            ):
+                MODULE.cmake_compiler_launcher_args()
 
 
 class VaneWheelTests(unittest.TestCase):
@@ -856,6 +871,7 @@ class VaneWheelTests(unittest.TestCase):
                         "VCPKG_TOOLCHAIN_PATH": str(toolchain),
                         "VCPKG_TARGET_TRIPLET": "x64-linux",
                         "VANE_VCPKG_INSTALLED_DIR": str(installed_root),
+                        "VANE_CMAKE_COMPILER_LAUNCHER": "ccache",
                         "CMAKE_PREFIX_PATH": "/ambient/prefix",
                         "SKBUILD_CMAKE_DEFINE": "BUILD_EXTENSIONS=ambient",
                         "VANE_CMAKE_PREFIX_PATH": "/ambient/vane-prefix",
@@ -903,6 +919,8 @@ class VaneWheelTests(unittest.TestCase):
             self.assertIn("--fresh", cmake_args)
             self.assertIn("-DBUILD_DISTRIBUTED_EXCHANGE=ON", cmake_args)
             self.assertIn("-DENABLE_EXTENSION_AUTOINSTALL=OFF", cmake_args)
+            self.assertIn("-DCMAKE_C_COMPILER_LAUNCHER=ccache", cmake_args)
+            self.assertIn("-DCMAKE_CXX_COMPILER_LAUNCHER=ccache", cmake_args)
             self.assertIn(
                 f"-DDUCKDB_EXTENSION_CONFIGS={extension_config};"
                 f"{build_dir / 'vane-extension-link.cmake'}",
@@ -935,6 +953,7 @@ class VaneWheelTests(unittest.TestCase):
             self.assertNotIn("SETUPTOOLS_SCM_PRETEND_VERSION", environment)
             self.assertNotIn("SKBUILD_CMAKE_DEFINE", environment)
             self.assertNotIn("VANE_CMAKE_PREFIX_PATH", environment)
+            self.assertNotIn("VANE_CMAKE_COMPILER_LAUNCHER", environment)
             self.assertNotIn("DONT_LINK", environment)
             self.assertNotIn("DUCKDB_HTTPFS_DIRECTORY", environment)
             self.assertNotIn("VCPKG_OVERLAY_PORTS", environment)
@@ -1067,6 +1086,37 @@ class WorkflowContractTests(unittest.TestCase):
             "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
             wheel_job,
         )
+
+    def test_build_lanes_cache_bounded_compiler_objects_without_build_trees(self) -> None:
+        workflow = (
+            Path(__file__).parents[1] / ".github/workflows/_vane_extension_ci.yml"
+        ).read_text()
+        _, native_job = workflow.split("  native:\n", 1)
+        native_job, wheel_job = native_job.split("  wheel:\n", 1)
+        cache_action = "actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae"
+
+        self.assertIn(
+            "CCACHE_DIR: ${{ github.workspace }}/.cache/vane-native-ccache",
+            native_job,
+        )
+        self.assertIn(
+            "CCACHE_DIR: ${{ github.workspace }}/.cache/vane-wheel-ccache",
+            wheel_job,
+        )
+        for job, lane in ((native_job, "native"), (wheel_job, "wheel")):
+            self.assertIn("CCACHE_MAXSIZE: 750M", job)
+            self.assertIn("CCACHE_COMPILERCHECK: content", job)
+            self.assertIn("VANE_CMAKE_COMPILER_LAUNCHER: ccache", job)
+            self.assertIn(cache_action, job)
+            self.assertIn(f"id: {lane}_ccache", job)
+            self.assertIn(f"vane-{lane}-ccache-v1-", job)
+            self.assertIn("${{ steps.manifest.outputs.vane_revision }}", job)
+            self.assertIn("ccache --zero-stats", job)
+            self.assertIn("ccache --show-stats", job)
+            self.assertNotIn("path: ${{ github.workspace }}/build", job)
+
+        self.assertIn("sudo apt-get install -y ccache", native_job)
+        self.assertIn("            ccache", wheel_job)
 
     def test_local_wheel_target_bootstraps_exact_vane_dependencies(self) -> None:
         makefile = (

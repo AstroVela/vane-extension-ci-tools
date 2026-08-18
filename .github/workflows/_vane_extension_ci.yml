@@ -107,6 +107,10 @@ jobs:
       VANE_BUILD_JOBS: ${{ inputs.build_jobs }}
       VANE_CI_TOOLS_VERSION: ${{ inputs.ci_tools_version }}
       VCPKG_TARGET_TRIPLET: x64-linux
+      CCACHE_DIR: ${{ github.workspace }}/.cache/vane-native-ccache
+      CCACHE_MAXSIZE: 750M
+      CCACHE_COMPILERCHECK: content
+      VANE_CMAKE_COMPILER_LAUNCHER: ccache
 
     steps:
       - name: Checkout extension and submodules
@@ -156,8 +160,24 @@ jobs:
             identity \
             --vane-source "$VANE_SOURCE_DIR"
 
-      - name: Install CMake and Ninja
-        run: python -m pip install "cmake>=3.29" "ninja>=1.10"
+      - name: Install CMake, Ninja, and ccache
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ccache
+          python -m pip install "cmake>=3.29" "ninja>=1.10"
+
+      - name: Restore Vane native compiler cache
+        id: native_ccache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: vane-native-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_TARGET_TRIPLET }}-${{ steps.manifest.outputs.vane_revision }}
+
+      - name: Reset Vane native compiler cache statistics
+        shell: bash
+        run: |
+          set -euo pipefail
+          ccache --zero-stats
 
       - name: Read vcpkg baseline
         id: vcpkg
@@ -187,6 +207,16 @@ jobs:
             VANE_BUILD_JOBS="$VANE_BUILD_JOBS" \
             VANE_SKIP_NATIVE_TESTS="$VANE_SKIP_NATIVE_TESTS"
 
+      - name: Report Vane native compiler cache
+        if: always()
+        shell: bash
+        env:
+          VANE_CCACHE_ACTION_HIT: ${{ steps.native_ccache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          printf 'GitHub Actions ccache restore hit: %s\n' "${VANE_CCACHE_ACTION_HIT:-false}"
+          ccache --show-stats
+
   wheel:
     name: Vane wheel with linked extension
     needs: verify_workflow
@@ -205,6 +235,10 @@ jobs:
       VANE_BUILD_JOBS: ${{ inputs.build_jobs }}
       VANE_CI_TOOLS_VERSION: ${{ inputs.ci_tools_version }}
       VCPKG_TARGET_TRIPLET: x64-linux
+      CCACHE_DIR: ${{ github.workspace }}/.cache/vane-wheel-ccache
+      CCACHE_MAXSIZE: 750M
+      CCACHE_COMPILERCHECK: content
+      VANE_CMAKE_COMPILER_LAUNCHER: ccache
 
     steps:
       - name: Checkout extension and submodules
@@ -262,6 +296,7 @@ jobs:
             automake \
             bison \
             build-essential \
+            ccache \
             curl \
             flex \
             libtool \
@@ -280,6 +315,19 @@ jobs:
           "pybind11[global]>=3.0.0"
           "scikit-build-core>=0.11.4"
           "setuptools-scm>=9.2.0"
+
+      - name: Restore Vane wheel compiler cache
+        id: wheel_ccache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: vane-wheel-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_TARGET_TRIPLET }}-${{ steps.manifest.outputs.vane_revision }}
+
+      - name: Reset Vane wheel compiler cache statistics
+        shell: bash
+        run: |
+          set -euo pipefail
+          ccache --zero-stats
 
       - name: Read extension vcpkg baseline
         id: vcpkg
@@ -311,6 +359,16 @@ jobs:
             VANE_VCPKG_INSTALLED_DIR="$VANE_VCPKG_INSTALLED_DIR" \
             VANE_BUILD_JOBS="$VANE_BUILD_JOBS" \
             VCPKG_TARGET_TRIPLET="$VCPKG_TARGET_TRIPLET"
+
+      - name: Report Vane wheel compiler cache
+        if: always()
+        shell: bash
+        env:
+          VANE_CCACHE_ACTION_HIT: ${{ steps.wheel_ccache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          printf 'GitHub Actions ccache restore hit: %s\n' "${VANE_CCACHE_ACTION_HIT:-false}"
+          ccache --show-stats
 
       - name: Upload verified Vane wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
