@@ -1068,6 +1068,36 @@ class WorkflowContractTests(unittest.TestCase):
             wheel_job,
         )
 
+    def test_build_lanes_cache_bounded_compiler_objects_without_build_trees(self) -> None:
+        workflow = (
+            Path(__file__).parents[1] / ".github/workflows/_vane_extension_ci.yml"
+        ).read_text()
+        _, native_job = workflow.split("  native:\n", 1)
+        native_job, wheel_job = native_job.split("  wheel:\n", 1)
+        cache_action = "actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae"
+
+        self.assertIn(
+            "CCACHE_DIR: ${{ github.workspace }}/.cache/vane-native-ccache",
+            native_job,
+        )
+        self.assertIn(
+            "CCACHE_DIR: ${{ github.workspace }}/.cache/vane-wheel-ccache",
+            wheel_job,
+        )
+        for job, lane in ((native_job, "native"), (wheel_job, "wheel")):
+            self.assertIn("CCACHE_MAXSIZE: 750M", job)
+            self.assertIn("CCACHE_COMPILERCHECK: content", job)
+            self.assertIn(cache_action, job)
+            self.assertIn(f"id: {lane}_ccache", job)
+            self.assertIn(f"vane-{lane}-ccache-v1-", job)
+            self.assertIn("${{ steps.manifest.outputs.vane_revision }}", job)
+            self.assertIn("ccache --zero-stats", job)
+            self.assertIn("ccache --show-stats", job)
+            self.assertNotIn("path: ${{ github.workspace }}/build", job)
+
+        self.assertIn("sudo apt-get install -y ccache", native_job)
+        self.assertIn("            ccache", wheel_job)
+
     def test_local_wheel_target_bootstraps_exact_vane_dependencies(self) -> None:
         makefile = (
             Path(__file__).parents[1] / "makefiles/vane_extension.Makefile"

@@ -168,6 +168,14 @@ and a fresh official fetch resolve to it. The extension build and tests also run
 with `contents: read` alone. The verified wheel is uploaded as
 `vane-<extension-name>-wheel`, and the workflow uses no deployment secrets.
 
+The native and wheel lanes keep separate, bounded 750 MiB `ccache` directories.
+Their cache keys include the runner, vcpkg triplet, and exact Vane revision, so
+a Vane revision change starts a new compiler cache without sharing a parallel
+lane's write. The workflow reports both the Actions cache restore result and
+per-run `ccache` statistics. It never caches a CMake build directory or a
+`vcpkg_installed` tree; `lukka/run-vcpkg` remains responsible for vcpkg's binary
+package cache.
+
 ## Development
 
 Run the self-contained test suite with Python 3.11 or newer:
