@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import importlib.util
 import json
 import os
@@ -593,86 +592,6 @@ class CIToolsCheckoutTests(unittest.TestCase):
                 MODULE.verify_ci_tools_checkout(checkout, revision)
 
 
-class ReusableWorkflowIdentityTests(unittest.TestCase):
-    @staticmethod
-    def token(claims: dict[str, object]) -> str:
-        def encode(value: object) -> str:
-            return (
-                base64.urlsafe_b64encode(json.dumps(value).encode())
-                .rstrip(b"=")
-                .decode()
-            )
-
-        return f"{encode({'alg': 'none'})}.{encode(claims)}.signature"
-
-    def test_accepts_matching_reusable_workflow_identity(self) -> None:
-        revision = "a" * 40
-        MODULE.verify_reusable_workflow_identity(
-            self.token(
-                {
-                    "aud": MODULE.OIDC_AUDIENCE,
-                    "job_workflow_ref": (
-                        "AstroVela/vane-extension-ci-tools/"
-                        ".github/workflows/_vane_extension_ci.yml@" + revision
-                    ),
-                    "job_workflow_sha": revision,
-                }
-            ),
-            revision,
-        )
-
-    def test_rejects_non_pinned_reusable_workflow_ref(self) -> None:
-        revision = "a" * 40
-        with self.assertRaisesRegex(MODULE.ConfigurationError, "workflow ref mismatch"):
-            MODULE.verify_reusable_workflow_identity(
-                self.token(
-                    {
-                        "aud": MODULE.OIDC_AUDIENCE,
-                        "job_workflow_ref": (
-                            "AstroVela/vane-extension-ci-tools/"
-                            ".github/workflows/_vane_extension_ci.yml@refs/heads/main"
-                        ),
-                        "job_workflow_sha": revision,
-                    }
-                ),
-                revision,
-            )
-
-    def test_rejects_mismatched_reusable_workflow_sha(self) -> None:
-        revision = "a" * 40
-        with self.assertRaisesRegex(MODULE.ConfigurationError, "workflow SHA mismatch"):
-            MODULE.verify_reusable_workflow_identity(
-                self.token(
-                    {
-                        "aud": MODULE.OIDC_AUDIENCE,
-                        "job_workflow_ref": (
-                            "AstroVela/vane-extension-ci-tools/"
-                            ".github/workflows/_vane_extension_ci.yml@" + revision
-                        ),
-                        "job_workflow_sha": "b" * 40,
-                    }
-                ),
-                revision,
-            )
-
-    def test_rejects_mismatched_oidc_audience(self) -> None:
-        revision = "a" * 40
-        with self.assertRaisesRegex(MODULE.ConfigurationError, "audience mismatch"):
-            MODULE.verify_reusable_workflow_identity(
-                self.token(
-                    {
-                        "aud": "different-audience",
-                        "job_workflow_ref": (
-                            "AstroVela/vane-extension-ci-tools/"
-                            ".github/workflows/_vane_extension_ci.yml@" + revision
-                        ),
-                        "job_workflow_sha": revision,
-                    }
-                ),
-                revision,
-            )
-
-
 class VaneNativeTests(unittest.TestCase):
     @staticmethod
     def manifest() -> object:
@@ -1075,23 +994,50 @@ class VaneWheelTests(unittest.TestCase):
 
 
 class WorkflowContractTests(unittest.TestCase):
-    def test_reusable_workflow_example_grants_caller_oidc_permission(self) -> None:
+    def test_reusable_workflow_example_requires_only_read_permissions(self) -> None:
         readme = (Path(__file__).parents[1] / "README.md").read_text()
-        self.assertIn("id-token: write", readme)
+        self.assertIn("contents: read", readme)
         self.assertIn(
-            "Reusable workflows cannot elevate this permission from the caller.",
+            "must name the same full commit SHA",
             readme,
         )
+        self.assertNotIn("id-token: write", readme)
 
-    def test_oidc_permission_is_isolated_from_native_build(self) -> None:
+    def test_reusable_workflow_verifies_the_exact_official_ci_tools_checkout(self) -> None:
         workflow = (
             Path(__file__).parents[1] / ".github/workflows/_vane_extension_ci.yml"
         ).read_text()
         verify_job, native_job = workflow.split("  native:\n", 1)
         self.assertIn("  verify_workflow:\n", verify_job)
-        self.assertIn("id-token: write", verify_job)
+        self.assertIn("repository: AstroVela/vane-extension-ci-tools", verify_job)
+        self.assertIn("ref: ${{ inputs.ci_tools_version }}", verify_job)
+        self.assertIn("verify-ci-tools", verify_job)
+        self.assertIn("--ci-tools-source ci-tools", verify_job)
+        self.assertIn(
+            "VANE_REUSABLE_WORKFLOW_REF: ${{ job.workflow_ref }}", verify_job
+        )
+        self.assertIn(
+            "VANE_REUSABLE_WORKFLOW_SHA: ${{ job.workflow_sha }}", verify_job
+        )
+        self.assertIn(
+            "VANE_REUSABLE_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}",
+            verify_job,
+        )
+        self.assertIn(
+            'expected_workflow_ref="AstroVela/vane-extension-ci-tools/'
+            '.github/workflows/_vane_extension_ci.yml@$VANE_CI_TOOLS_VERSION"',
+            verify_job,
+        )
+        self.assertIn(
+            'test "$VANE_REUSABLE_WORKFLOW_REF" = "$expected_workflow_ref"',
+            verify_job,
+        )
+        self.assertIn(
+            'test "$VANE_REUSABLE_WORKFLOW_SHA" = "$VANE_CI_TOOLS_VERSION"',
+            verify_job,
+        )
         self.assertIn("needs: verify_workflow", native_job)
-        self.assertNotIn("id-token: write", native_job)
+        self.assertNotIn("id-token: write", workflow)
 
     def test_ci_tools_input_is_not_interpolated_into_shell(self) -> None:
         workflow = (

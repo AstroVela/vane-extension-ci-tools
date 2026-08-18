@@ -149,10 +149,8 @@ its `vane-extension-ci-tools` submodule:
 ```yaml
 jobs:
   vane-extension:
-    # Reusable workflows cannot elevate this permission from the caller.
     permissions:
       contents: read
-      id-token: write
     uses: AstroVela/vane-extension-ci-tools/.github/workflows/_vane_extension_ci.yml@TOOLS_COMMIT_SHA
     with:
       ci_tools_version: TOOLS_COMMIT_SHA
@@ -160,14 +158,15 @@ jobs:
       build_jobs: 8
 ```
 
-The caller must grant `id-token: write`: a reusable workflow cannot elevate
-permissions inherited from its caller. The workflow verifies the caller's
-submodule gitlink and uses GitHub's signed OIDC claims to verify that the
-reusable workflow itself was invoked at that same commit SHA. Only the isolated
-verification job receives OIDC permission; the extension build and tests run in
-separate jobs with `contents: read` alone. The verified wheel is uploaded as
-`vane-<extension-name>-wheel`. The workflow uses no deployment secrets and
-requests an OIDC token only for this identity attestation.
+The caller's `uses` target, `ci_tools_version`, and CI-tools submodule gitlink
+must name the same full commit SHA. The read-only verification job checks that
+gitlink and GitHub's `job.workflow_repository`, `job.workflow_ref`, and
+`job.workflow_sha` metadata for the actually called reusable workflow. It then
+checks out that SHA directly from the hard-coded official
+`AstroVela/vane-extension-ci-tools` repository, and verifies both the checkout
+and a fresh official fetch resolve to it. The extension build and tests also run
+with `contents: read` alone. The verified wheel is uploaded as
+`vane-<extension-name>-wheel`, and the workflow uses no deployment secrets.
 
 ## Development
 

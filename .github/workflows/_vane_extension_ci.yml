@@ -36,10 +36,6 @@ jobs:
     name: Verify pinned Vane CI workflow
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    permissions:
-      contents: read
-      # GitHub-signed OIDC claims attest to the immutable reusable-workflow SHA.
-      id-token: write
     env:
       VANE_EXTENSION_ROOT: ${{ github.workspace }}/extension
       VANE_MANIFEST: ${{ github.workspace }}/extension/${{ inputs.manifest }}
@@ -77,16 +73,23 @@ jobs:
         with:
           python-version: ${{ inputs.python_version }}
 
-      - name: Verify pinned reusable workflow
+      - name: Verify exact official Vane CI tools
         shell: bash
+        env:
+          VANE_REUSABLE_WORKFLOW_REF: ${{ job.workflow_ref }}
+          VANE_REUSABLE_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          VANE_REUSABLE_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
         run: |
           set -euo pipefail
-          actual="$(git -C ci-tools rev-parse HEAD)"
-          test "$actual" = "$VANE_CI_TOOLS_VERSION"
+          expected_workflow_ref="AstroVela/vane-extension-ci-tools/.github/workflows/_vane_extension_ci.yml@$VANE_CI_TOOLS_VERSION"
+          test "$VANE_REUSABLE_WORKFLOW_REPOSITORY" = "AstroVela/vane-extension-ci-tools"
+          test "$VANE_REUSABLE_WORKFLOW_REF" = "$expected_workflow_ref"
+          test "$VANE_REUSABLE_WORKFLOW_SHA" = "$VANE_CI_TOOLS_VERSION"
           python ci-tools/scripts/vane_extension.py \
             --manifest "$VANE_MANIFEST" \
             --extension-root "$VANE_EXTENSION_ROOT" \
-            verify-reusable-workflow \
+            verify-ci-tools \
+            --ci-tools-source ci-tools \
             --expected-sha "$VANE_CI_TOOLS_VERSION"
 
   native:
