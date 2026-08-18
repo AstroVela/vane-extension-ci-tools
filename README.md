@@ -171,9 +171,10 @@ with `contents: read` alone. The verified wheel is uploaded as
 The native and wheel lanes keep separate, bounded 750 MiB `ccache` directories.
 Their cache keys include the runner, vcpkg triplet, and exact Vane revision, so
 a Vane revision change starts a new compiler cache without sharing a parallel
-lane's write. The workflow reports both the Actions cache restore result and
-per-run `ccache` statistics. It never caches a CMake build directory or a
-`vcpkg_installed` tree; `lukka/run-vcpkg` remains responsible for vcpkg's binary
+lane's write. The workflow explicitly passes `ccache` as CMake's C and C++
+compiler launcher, reports both the Actions cache restore result and per-run
+`ccache` statistics, and never caches a CMake build directory or a
+`vcpkg_installed` tree. `lukka/run-vcpkg` remains responsible for vcpkg's binary
 package cache.
 
 ## Development

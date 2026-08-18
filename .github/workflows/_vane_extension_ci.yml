@@ -110,6 +110,7 @@ jobs:
       CCACHE_DIR: ${{ github.workspace }}/.cache/vane-native-ccache
       CCACHE_MAXSIZE: 750M
       CCACHE_COMPILERCHECK: content
+      VANE_CMAKE_COMPILER_LAUNCHER: ccache
 
     steps:
       - name: Checkout extension and submodules
@@ -237,6 +238,7 @@ jobs:
       CCACHE_DIR: ${{ github.workspace }}/.cache/vane-wheel-ccache
       CCACHE_MAXSIZE: 750M
       CCACHE_COMPILERCHECK: content
+      VANE_CMAKE_COMPILER_LAUNCHER: ccache
 
     steps:
       - name: Checkout extension and submodules
