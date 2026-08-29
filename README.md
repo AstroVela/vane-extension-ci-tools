@@ -106,8 +106,8 @@ checkouts are always verified by fetching the exact revision directly from the
 hard-coded official `AstroVela/vane` URL; a different `origin` cannot substitute
 a fork-only commit. Preparation also fetches release tags from that same
 official URL and requires every local tag ref to match it exactly, so wheel
-metadata cannot use missing, moved, or private tags. The tools never reset or
-clean working-tree changes.
+metadata cannot use missing, moved, or private tags. Vane source preparation
+never resets or cleans working-tree changes.
 
 Override generated locations without changing the manifest:
 
@@ -183,7 +183,10 @@ a parallel lane's write. The workflow explicitly passes `ccache` as CMake's C
 and C++ compiler launcher, reports both the Actions cache restore result and
 per-run `ccache` statistics, and never caches a CMake build directory or a
 `vcpkg_installed` tree. `lukka/run-vcpkg` remains responsible for vcpkg's binary
-package cache.
+package cache. After bootstrapping, each lane validates that run-vcpkg's
+`vcpkgLastBuiltCommitId` state marker is a regular file containing the manifest's
+exact vcpkg revision, removes only that marker, and requires the vcpkg checkout to
+be clean before the extension build starts.
 
 ## Development
 
