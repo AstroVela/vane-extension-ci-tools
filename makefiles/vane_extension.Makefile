@@ -25,8 +25,8 @@ VANE_EXTENSION_COMMAND = $(VANE_PYTHON) \
 	--manifest "$(VANE_MANIFEST)" \
 	--extension-root "$(VANE_EXTENSION_ROOT)"
 
-.PHONY: vane_verify_ci_tools vane_validate vane_prepare vane_identity vane_native vane_ci \
-	vane_wheel_dependencies vane_wheel
+.PHONY: vane_verify_ci_tools vane_validate vane_prepare vane_identity vane_verify_vcpkg \
+	vane_native vane_ci vane_wheel_dependencies vane_wheel
 
 vane_verify_ci_tools:
 	$(VANE_EXTENSION_COMMAND) verify-ci-tools \
@@ -42,7 +42,10 @@ vane_prepare: vane_validate
 vane_identity: vane_prepare
 	$(VANE_EXTENSION_COMMAND) identity --vane-source "$(VANE_SOURCE_DIR)"
 
-vane_native: vane_prepare
+vane_verify_vcpkg: vane_validate
+	$(VANE_EXTENSION_COMMAND) verify-vcpkg
+
+vane_native: vane_prepare vane_verify_vcpkg
 	$(VANE_EXTENSION_COMMAND) native \
 		--vane-source "$(VANE_SOURCE_DIR)" \
 		--build-dir "$(VANE_NATIVE_BUILD_DIR)" \
@@ -51,7 +54,7 @@ vane_native: vane_prepare
 
 vane_ci: vane_native
 
-vane_wheel_dependencies: vane_prepare
+vane_wheel_dependencies: vane_prepare vane_verify_vcpkg
 	@case "$(VANE_BUILD_JOBS)" in \
 		''|*[!0-9]*|0) echo "VANE_BUILD_JOBS must be a positive integer" >&2; exit 2 ;; \
 	esac

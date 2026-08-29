@@ -20,13 +20,14 @@ from typing import NoReturn
 
 import tomllib
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 SOURCE_ID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
 FORK_VERSION_RE = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+-vane\.[0-9a-f]{10}")
 VANE_REPOSITORY = "AstroVela/vane"
 VANE_REPOSITORY_URL = f"https://github.com/{VANE_REPOSITORY}.git"
+VCPKG_REPOSITORY = "microsoft/vcpkg"
 CI_TOOLS_REPOSITORY = "AstroVela/vane-extension-ci-tools"
 CI_TOOLS_REPOSITORY_URL = f"https://github.com/{CI_TOOLS_REPOSITORY}.git"
 LINUX_X86_64_RENAMEAT2_SYSCALL = 316
@@ -105,6 +106,8 @@ class ExtensionManifest:
     native_test_selection: str
     vane_repository: str
     vane_revision: str
+    vcpkg_repository: str
+    vcpkg_revision: str
 
     @property
     def build_extensions_cmake(self) -> str:
@@ -228,6 +231,20 @@ def load_manifest(manifest_path: Path, extension_root: Path) -> ExtensionManifes
     if vane_revision == "0" * 40:
         fail("vane.revision must not be the template placeholder")
 
+    vcpkg_raw = raw.get("vcpkg")
+    if not isinstance(vcpkg_raw, dict):
+        fail("vcpkg must be a table")
+    vcpkg_repository = require_string(
+        vcpkg_raw, "repository", "vcpkg.repository"
+    )
+    if vcpkg_repository != VCPKG_REPOSITORY:
+        fail(f"vcpkg.repository must be {VCPKG_REPOSITORY}: {vcpkg_repository}")
+    vcpkg_revision = require_string(vcpkg_raw, "revision", "vcpkg.revision")
+    if not FULL_SHA_RE.fullmatch(vcpkg_revision):
+        fail("vcpkg.revision must be a full lowercase 40-character commit SHA")
+    if vcpkg_revision == "0" * 40:
+        fail("vcpkg.revision must not be the template placeholder")
+
     return ExtensionManifest(
         schema_version=schema_version,
         name=name,
@@ -236,6 +253,8 @@ def load_manifest(manifest_path: Path, extension_root: Path) -> ExtensionManifes
         native_test_selection=native_test_selection,
         vane_repository=vane_repository,
         vane_revision=vane_revision,
+        vcpkg_repository=vcpkg_repository,
+        vcpkg_revision=vcpkg_revision,
     )
 
 
@@ -543,6 +562,52 @@ def cmake_compiler_launcher_args() -> list[str]:
     ]
 
 
+def resolve_vcpkg_toolchain(manifest: ExtensionManifest) -> Path:
+    toolchain_value = os.environ.get("VCPKG_TOOLCHAIN_PATH", "")
+    toolchain = Path(toolchain_value).resolve() if toolchain_value else None
+    if toolchain is None or not toolchain.is_file():
+        fail("VCPKG_TOOLCHAIN_PATH must identify the vcpkg CMake toolchain")
+    if toolchain.parts[-3:] != ("scripts", "buildsystems", "vcpkg.cmake"):
+        fail(
+            "VCPKG_TOOLCHAIN_PATH must end in "
+            "scripts/buildsystems/vcpkg.cmake"
+        )
+
+    vcpkg_root = toolchain.parents[2]
+    try:
+        actual_root = Path(
+            run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=vcpkg_root,
+                capture=True,
+            )
+        ).resolve()
+        actual_revision = run(
+            ["git", "rev-parse", "HEAD^{commit}"],
+            cwd=vcpkg_root,
+            capture=True,
+        )
+        status = run(
+            ["git", "status", "--porcelain"], cwd=vcpkg_root, capture=True
+        )
+    except subprocess.CalledProcessError:
+        fail(f"vcpkg toolchain is not in a valid Git checkout: {vcpkg_root}")
+
+    if actual_root != vcpkg_root:
+        fail(
+            "VCPKG_TOOLCHAIN_PATH is not rooted at the selected vcpkg checkout: "
+            f"{vcpkg_root}"
+        )
+    if actual_revision != manifest.vcpkg_revision:
+        fail(
+            "vcpkg revision mismatch: "
+            f"expected {manifest.vcpkg_revision}, got {actual_revision}"
+        )
+    if status:
+        fail(f"vcpkg checkout has working-tree changes: {vcpkg_root}")
+    return toolchain
+
+
 def verify_selected_test_output(output: str) -> None:
     if "All tests were skipped" in output:
         fail("selected native test did not execute: all test cases were skipped")
@@ -574,11 +639,8 @@ def run_native(
     jobs: int,
     skip_tests: bool,
 ) -> None:
+    toolchain = resolve_vcpkg_toolchain(manifest)
     identity = resolve_vane_identity(vane_source, manifest)
-    toolchain_value = os.environ.get("VCPKG_TOOLCHAIN_PATH", "")
-    toolchain = Path(toolchain_value).resolve() if toolchain_value else None
-    if toolchain is None or not toolchain.is_file():
-        fail("VCPKG_TOOLCHAIN_PATH must identify the vcpkg CMake toolchain")
 
     target_triplet = os.environ.get("VCPKG_TARGET_TRIPLET", "x64-linux")
     extension_config = resolve_within(
@@ -812,10 +874,7 @@ def build_vane_wheel(
     target_triplet = os.environ.get("VCPKG_TARGET_TRIPLET", "x64-linux")
     require_vane_wheel_platform(target_triplet)
     reject_duckdb_local_extension_config(vane_source)
-    toolchain_value = os.environ.get("VCPKG_TOOLCHAIN_PATH", "")
-    toolchain = Path(toolchain_value).resolve() if toolchain_value else None
-    if toolchain is None or not toolchain.is_file():
-        fail("VCPKG_TOOLCHAIN_PATH must identify the vcpkg CMake toolchain")
+    toolchain = resolve_vcpkg_toolchain(manifest)
 
     identity = resolve_vane_identity(vane_source, manifest)
     vane_dependency_prefix = require_vane_wheel_dependency_prefix(
@@ -953,6 +1012,8 @@ def manifest_outputs(
         "native_test_selection": manifest.native_test_selection,
         "vane_repository": manifest.vane_repository,
         "vane_revision": manifest.vane_revision,
+        "vcpkg_repository": manifest.vcpkg_repository,
+        "vcpkg_revision": manifest.vcpkg_revision,
     }
 
 
@@ -983,6 +1044,8 @@ def build_parser() -> argparse.ArgumentParser:
     ci_tools_parser = subparsers.add_parser("verify-ci-tools")
     ci_tools_parser.add_argument("--ci-tools-source", type=Path, required=True)
     ci_tools_parser.add_argument("--expected-sha", required=True)
+
+    subparsers.add_parser("verify-vcpkg")
 
     native_parser = subparsers.add_parser("native")
     native_parser.add_argument("--vane-source", type=Path, required=True)
@@ -1019,6 +1082,8 @@ def main() -> int:
         print(json.dumps(values, indent=2, sort_keys=True))
     elif args.command == "verify-ci-tools":
         verify_ci_tools_checkout(args.ci_tools_source.resolve(), args.expected_sha)
+    elif args.command == "verify-vcpkg":
+        resolve_vcpkg_toolchain(manifest)
     elif args.command == "native":
         jobs = require_positive_int(args.jobs, "jobs")
         run_native(
