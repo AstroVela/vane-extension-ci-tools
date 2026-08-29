@@ -1235,6 +1235,52 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("builtin-baseline", workflow)
         self.assertNotIn("Read vcpkg baseline", workflow)
 
+    def test_build_lanes_remove_only_the_verified_run_vcpkg_marker(self) -> None:
+        workflow = (
+            Path(__file__).parents[1] / ".github/workflows/_vane_extension_ci.yml"
+        ).read_text()
+        _, native_job = workflow.split("  native:\n", 1)
+        native_job, wheel_job = native_job.split("  wheel:\n", 1)
+
+        for job, build_step in (
+            (native_job, "Build and test extension against Vane DuckDB"),
+            (wheel_job, "Build and verify extension-bearing Vane wheel"),
+        ):
+            self.assertEqual(
+                job.count("- name: Remove verified run-vcpkg state marker"), 1
+            )
+            self.assertLess(
+                job.index("uses: lukka/run-vcpkg@"),
+                job.index("- name: Remove verified run-vcpkg state marker"),
+            )
+            self.assertLess(
+                job.index("- name: Remove verified run-vcpkg state marker"),
+                job.index(f"- name: {build_step}"),
+            )
+            self.assertIn(
+                "VANE_VCPKG_REVISION: "
+                "${{ steps.manifest.outputs.vcpkg_revision }}",
+                job,
+            )
+            self.assertIn(
+                'marker="$VANE_VCPKG_ROOT/vcpkgLastBuiltCommitId"', job
+            )
+            self.assertIn('test -f "$marker"', job)
+            self.assertIn('test ! -L "$marker"', job)
+            self.assertIn('test "$(wc -c < "$marker")" -eq 40', job)
+            self.assertIn(
+                'test "$(<"$marker")" = "$VANE_VCPKG_REVISION"', job
+            )
+            self.assertIn('rm -- "$marker"', job)
+            self.assertIn(
+                'vcpkg_status="$(git -C "$VANE_VCPKG_ROOT" '
+                'status --porcelain --untracked-files=all)"',
+                job,
+            )
+            self.assertIn('test -z "$vcpkg_status"', job)
+            self.assertNotIn("git clean", job)
+            self.assertNotIn("rm -rf", job)
+
     def test_local_targets_verify_committed_ci_tools_gitlink(self) -> None:
         makefile = (
             Path(__file__).parents[1] / "makefiles/vane_extension.Makefile"

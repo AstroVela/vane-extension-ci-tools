@@ -185,6 +185,22 @@ jobs:
           vcpkgGitCommitId: ${{ steps.manifest.outputs.vcpkg_revision }}
           vcpkgDirectory: ${{ github.workspace }}/vcpkg
 
+      - name: Remove verified run-vcpkg state marker
+        shell: bash
+        env:
+          VANE_VCPKG_REVISION: ${{ steps.manifest.outputs.vcpkg_revision }}
+          VANE_VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+        run: |
+          set -euo pipefail
+          marker="$VANE_VCPKG_ROOT/vcpkgLastBuiltCommitId"
+          test -f "$marker"
+          test ! -L "$marker"
+          test "$(wc -c < "$marker")" -eq 40
+          test "$(<"$marker")" = "$VANE_VCPKG_REVISION"
+          rm -- "$marker"
+          vcpkg_status="$(git -C "$VANE_VCPKG_ROOT" status --porcelain --untracked-files=all)"
+          test -z "$vcpkg_status"
+
       - name: Build and test extension against Vane DuckDB
         env:
           VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
@@ -326,6 +342,22 @@ jobs:
         with:
           vcpkgGitCommitId: ${{ steps.manifest.outputs.vcpkg_revision }}
           vcpkgDirectory: ${{ github.workspace }}/vcpkg
+
+      - name: Remove verified run-vcpkg state marker
+        shell: bash
+        env:
+          VANE_VCPKG_REVISION: ${{ steps.manifest.outputs.vcpkg_revision }}
+          VANE_VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+        run: |
+          set -euo pipefail
+          marker="$VANE_VCPKG_ROOT/vcpkgLastBuiltCommitId"
+          test -f "$marker"
+          test ! -L "$marker"
+          test "$(wc -c < "$marker")" -eq 40
+          test "$(<"$marker")" = "$VANE_VCPKG_REVISION"
+          rm -- "$marker"
+          vcpkg_status="$(git -C "$VANE_VCPKG_ROOT" status --porcelain --untracked-files=all)"
+          test -z "$vcpkg_status"
 
       - name: Build and verify extension-bearing Vane wheel
         env:
