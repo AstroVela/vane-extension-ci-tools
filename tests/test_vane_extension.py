@@ -33,12 +33,14 @@ class ManifestTests(unittest.TestCase):
         config: str = "extension_config.cmake",
         repository: str = "AstroVela/vane",
         native_test_selection: str = "test/",
+        vcpkg_revision: str = "b" * 40,
+        vcpkg_repository: str = "microsoft/vcpkg",
     ) -> Path:
         path = self.root / "vane-extension.toml"
         path.write_text(
             "\n".join(
                 [
-                    "schema_version = 1",
+                    "schema_version = 2",
                     'name = "iceberg"',
                     f'extension_config = "{config}"',
                     'build_extensions = ["httpfs", "parquet", "tpch"]',
@@ -47,6 +49,10 @@ class ManifestTests(unittest.TestCase):
                     "[vane]",
                     f'repository = "{repository}"',
                     f'revision = "{revision}"',
+                    "",
+                    "[vcpkg]",
+                    f'repository = "{vcpkg_repository}"',
+                    f'revision = "{vcpkg_revision}"',
                     "",
                 ]
             )
@@ -58,6 +64,21 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(manifest.name, "iceberg")
         self.assertEqual(manifest.build_extensions_cmake, "httpfs;parquet;tpch")
         self.assertEqual(manifest.vane_repository, "AstroVela/vane")
+        self.assertEqual(manifest.vcpkg_repository, "microsoft/vcpkg")
+        self.assertEqual(manifest.vcpkg_revision, "b" * 40)
+        outputs = MODULE.manifest_outputs(manifest, self.root)
+        self.assertEqual(outputs["vcpkg_repository"], "microsoft/vcpkg")
+        self.assertEqual(outputs["vcpkg_revision"], "b" * 40)
+
+    def test_rejects_previous_schema_version(self) -> None:
+        path = self.write_manifest()
+        path.write_text(
+            path.read_text().replace("schema_version = 2", "schema_version = 1")
+        )
+        with self.assertRaisesRegex(
+            MODULE.ConfigurationError, "schema_version must be 2"
+        ):
+            MODULE.load_manifest(path, self.root)
 
     def test_rejects_non_exact_vane_revision(self) -> None:
         with self.assertRaisesRegex(MODULE.ConfigurationError, "full lowercase"):
@@ -67,10 +88,30 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.ConfigurationError, "placeholder"):
             MODULE.load_manifest(self.write_manifest("0" * 40), self.root)
 
+    def test_rejects_non_exact_vcpkg_revision(self) -> None:
+        with self.assertRaisesRegex(MODULE.ConfigurationError, "full lowercase"):
+            MODULE.load_manifest(
+                self.write_manifest(vcpkg_revision="main"), self.root
+            )
+
+    def test_rejects_template_vcpkg_revision(self) -> None:
+        with self.assertRaisesRegex(MODULE.ConfigurationError, "placeholder"):
+            MODULE.load_manifest(
+                self.write_manifest(vcpkg_revision="0" * 40), self.root
+            )
+
+    def test_rejects_missing_vcpkg_table(self) -> None:
+        path = self.write_manifest()
+        path.write_text(path.read_text().split("\n[vcpkg]\n", 1)[0] + "\n")
+        with self.assertRaisesRegex(
+            MODULE.ConfigurationError, "vcpkg must be a table"
+        ):
+            MODULE.load_manifest(path, self.root)
+
     def test_rejects_boolean_schema_version(self) -> None:
         path = self.write_manifest()
         path.write_text(
-            path.read_text().replace("schema_version = 1", "schema_version = true")
+            path.read_text().replace("schema_version = 2", "schema_version = true")
         )
         with self.assertRaisesRegex(MODULE.ConfigurationError, "schema_version"):
             MODULE.load_manifest(path, self.root)
@@ -81,6 +122,15 @@ class ManifestTests(unittest.TestCase):
         ):
             MODULE.load_manifest(
                 self.write_manifest(repository="someone-else/vane"), self.root
+            )
+
+    def test_rejects_noncanonical_vcpkg_repository(self) -> None:
+        with self.assertRaisesRegex(
+            MODULE.ConfigurationError, "must be microsoft/vcpkg"
+        ):
+            MODULE.load_manifest(
+                self.write_manifest(vcpkg_repository="someone-else/vcpkg"),
+                self.root,
             )
 
     def test_rejects_extension_config_outside_root(self) -> None:
@@ -113,6 +163,95 @@ class ManifestTests(unittest.TestCase):
             MODULE.ConfigurationError, "must not contain the target extension"
         ):
             MODULE.load_manifest(path, self.root)
+
+
+class VcpkgToolchainTests(unittest.TestCase):
+    @staticmethod
+    def manifest(revision: str) -> object:
+        return MODULE.ExtensionManifest(
+            schema_version=2,
+            name="iceberg",
+            extension_config="extension_config.cmake",
+            build_extensions=("httpfs",),
+            native_test_selection="test/",
+            vane_repository="AstroVela/vane",
+            vane_revision="a" * 40,
+            vcpkg_repository="microsoft/vcpkg",
+            vcpkg_revision=revision,
+        )
+
+    @staticmethod
+    def create_checkout(root: Path) -> tuple[Path, Path, str]:
+        checkout = root / "vcpkg"
+        toolchain = checkout / "scripts/buildsystems/vcpkg.cmake"
+        toolchain.parent.mkdir(parents=True)
+        toolchain.write_text("# fixture\n")
+        subprocess.run(["git", "init"], cwd=checkout, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "fixture@example.com"],
+            cwd=checkout,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Fixture"], cwd=checkout, check=True
+        )
+        subprocess.run(["git", "add", "."], cwd=checkout, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "fixture"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+        )
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        return checkout, toolchain, revision
+
+    def test_accepts_clean_exact_vcpkg_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            _, toolchain, revision = self.create_checkout(
+                Path(temporary_directory)
+            )
+            with mock.patch.dict(
+                os.environ, {"VCPKG_TOOLCHAIN_PATH": str(toolchain)}, clear=True
+            ):
+                self.assertEqual(
+                    MODULE.resolve_vcpkg_toolchain(self.manifest(revision)),
+                    toolchain,
+                )
+
+    def test_rejects_mismatched_vcpkg_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            _, toolchain, _ = self.create_checkout(Path(temporary_directory))
+            with (
+                mock.patch.dict(
+                    os.environ, {"VCPKG_TOOLCHAIN_PATH": str(toolchain)}, clear=True
+                ),
+                self.assertRaisesRegex(
+                    MODULE.ConfigurationError, "vcpkg revision mismatch"
+                ),
+            ):
+                MODULE.resolve_vcpkg_toolchain(self.manifest("b" * 40))
+
+    def test_rejects_dirty_vcpkg_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            _, toolchain, revision = self.create_checkout(
+                Path(temporary_directory)
+            )
+            toolchain.write_text("# dirty\n")
+            with (
+                mock.patch.dict(
+                    os.environ, {"VCPKG_TOOLCHAIN_PATH": str(toolchain)}, clear=True
+                ),
+                self.assertRaisesRegex(
+                    MODULE.ConfigurationError, "working-tree changes"
+                ),
+            ):
+                MODULE.resolve_vcpkg_toolchain(self.manifest(revision))
 
 
 class IdentityTests(unittest.TestCase):
@@ -163,7 +302,7 @@ class IdentityTests(unittest.TestCase):
             manifest_path.write_text(
                 "\n".join(
                     [
-                        "schema_version = 1",
+                        "schema_version = 2",
                         'name = "iceberg"',
                         'extension_config = "extension_config.cmake"',
                         'build_extensions = ["httpfs", "parquet"]',
@@ -172,6 +311,10 @@ class IdentityTests(unittest.TestCase):
                         "[vane]",
                         'repository = "AstroVela/vane"',
                         f'revision = "{revision}"',
+                        "",
+                        "[vcpkg]",
+                        'repository = "microsoft/vcpkg"',
+                        'revision = "' + "b" * 40 + '"',
                     ]
                 )
             )
@@ -238,13 +381,15 @@ class VaneCheckoutTests(unittest.TestCase):
     @staticmethod
     def manifest(revision: str) -> object:
         return MODULE.ExtensionManifest(
-            schema_version=1,
+            schema_version=2,
             name="iceberg",
             extension_config="extension_config.cmake",
             build_extensions=("httpfs",),
             native_test_selection="test/",
             vane_repository="AstroVela/vane",
             vane_revision=revision,
+            vcpkg_repository="microsoft/vcpkg",
+            vcpkg_revision="b" * 40,
         )
 
     def test_prepare_fetches_complete_history(self) -> None:
@@ -596,13 +741,15 @@ class VaneNativeTests(unittest.TestCase):
     @staticmethod
     def manifest() -> object:
         return MODULE.ExtensionManifest(
-            schema_version=1,
+            schema_version=2,
             name="iceberg",
             extension_config="extension_config.cmake",
             build_extensions=("httpfs", "parquet"),
             native_test_selection="test/",
             vane_repository="AstroVela/vane",
             vane_revision="a" * 40,
+            vcpkg_repository="microsoft/vcpkg",
+            vcpkg_revision="b" * 40,
         )
 
     @staticmethod
@@ -647,6 +794,9 @@ class VaneNativeTests(unittest.TestCase):
                 mock.patch.object(
                     MODULE, "resolve_vane_identity", return_value=self.identity()
                 ),
+                mock.patch.object(
+                    MODULE, "resolve_vcpkg_toolchain", return_value=toolchain
+                ),
                 mock.patch.object(MODULE, "run", side_effect=fake_run),
             ):
                 MODULE.run_native(
@@ -687,13 +837,15 @@ class VaneWheelTests(unittest.TestCase):
     @staticmethod
     def manifest() -> object:
         return MODULE.ExtensionManifest(
-            schema_version=1,
+            schema_version=2,
             name="iceberg",
             extension_config="extension_config.cmake",
             build_extensions=("httpfs", "parquet"),
             native_test_selection="test/",
             vane_repository="AstroVela/vane",
             vane_revision="a" * 40,
+            vcpkg_repository="microsoft/vcpkg",
+            vcpkg_revision="b" * 40,
         )
 
     @staticmethod
@@ -890,6 +1042,9 @@ class VaneWheelTests(unittest.TestCase):
                 mock.patch.object(
                     MODULE, "resolve_vane_identity", return_value=identity
                 ),
+                mock.patch.object(
+                    MODULE, "resolve_vcpkg_toolchain", return_value=toolchain
+                ),
                 mock.patch.object(MODULE, "run", side_effect=fake_run),
                 mock.patch.object(MODULE, "verify_vane_wheel") as verify_wheel,
             ):
@@ -1065,12 +1220,32 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("VANE_CI_TOOLS_VERSION: ${{ inputs.ci_tools_version }}", workflow)
         self.assertNotIn('"${{ inputs.ci_tools_version }}"', workflow)
 
+    def test_build_lanes_use_the_explicit_manifest_vcpkg_revision(self) -> None:
+        workflow = (
+            Path(__file__).parents[1] / ".github/workflows/_vane_extension_ci.yml"
+        ).read_text()
+        _, native_job = workflow.split("  native:\n", 1)
+        native_job, wheel_job = native_job.split("  wheel:\n", 1)
+        expected = (
+            "vcpkgGitCommitId: "
+            "${{ steps.manifest.outputs.vcpkg_revision }}"
+        )
+        self.assertEqual(native_job.count(expected), 1)
+        self.assertEqual(wheel_job.count(expected), 1)
+        self.assertNotIn("builtin-baseline", workflow)
+        self.assertNotIn("Read vcpkg baseline", workflow)
+
     def test_local_targets_verify_committed_ci_tools_gitlink(self) -> None:
         makefile = (
             Path(__file__).parents[1] / "makefiles/vane_extension.Makefile"
         ).read_text()
         self.assertIn('rev-parse "HEAD:vane-extension-ci-tools"', makefile)
         self.assertIn("vane_validate: vane_verify_ci_tools", makefile)
+        self.assertIn("vane_verify_vcpkg: vane_validate", makefile)
+        self.assertIn("$(VANE_EXTENSION_COMMAND) verify-vcpkg", makefile)
+        self.assertIn(
+            "vane_wheel_dependencies: vane_prepare vane_verify_vcpkg", makefile
+        )
 
     def test_wheel_lane_is_read_only_and_uploads_verified_artifact(self) -> None:
         workflow = (
@@ -1111,6 +1286,7 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertIn(f"id: {lane}_ccache", job)
             self.assertIn(f"vane-{lane}-ccache-v1-", job)
             self.assertIn("${{ steps.manifest.outputs.vane_revision }}", job)
+            self.assertIn("${{ steps.manifest.outputs.vcpkg_revision }}", job)
             self.assertIn("ccache --zero-stats", job)
             self.assertIn("ccache --show-stats", job)
             self.assertNotIn("path: ${{ github.workspace }}/build", job)

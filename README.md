@@ -14,8 +14,9 @@ Vane-only integration layer.
 - `AstroVela/vane` is the only accepted source of the distributed DuckDB fork.
   The tools check out its exact revision and build against `external/duckdb`;
   no DuckDB mirror or alternate fork is accepted.
-- Every build pins a full Vane commit SHA. Branch names, tags, `main`, version
-  guesses, and runtime fallbacks are rejected.
+- Every build pins full Vane and official `microsoft/vcpkg` commit SHAs in the
+  integration manifest. Branch names, tags, `main`, version guesses, native
+  manifest inference, and runtime fallbacks are rejected.
 - Local Make targets read the exact CI-tools SHA from the extension repository's
   committed `vane-extension-ci-tools` gitlink, then require this checkout to be
   clean, at that revision, and available from the official repository.
@@ -55,20 +56,22 @@ include vane-extension-ci-tools/makefiles/vane_extension.Makefile
 ```
 
 The second include only defines `vane_verify_ci_tools`, `vane_validate`,
-`vane_prepare`, `vane_identity`, `vane_native`, `vane_ci`,
-`vane_wheel_dependencies`, and `vane_wheel`.
+`vane_prepare`, `vane_identity`, `vane_verify_vcpkg`, `vane_native`,
+`vane_ci`, `vane_wheel_dependencies`, and `vane_wheel`.
 
 ## Manifest
 
 Copy [`templates/vane-extension.toml`](templates/vane-extension.toml) into the
-extension repository and replace every placeholder with a reviewed value. The
-Vane revision must be a complete lowercase 40-character commit SHA.
+extension repository and replace every placeholder with a reviewed value.
+Schema 2 requires complete lowercase 40-character Vane and vcpkg commit SHAs.
+The vcpkg revision is an explicit Vane-lane input; it is not inferred from the
+extension's native `vcpkg.json`.
 
-The manifest describes source and test selection only. `build_extensions`
-lists supporting extensions; it must not repeat the target `name`, whose source
-and link policy are owned by `extension_config`. Distributed scan and write
-protocol versions remain owned by the extension's C++ registrations and the
-runtime capability manifest.
+The manifest describes exact source and toolchain selection plus native test
+selection. `build_extensions` lists supporting extensions; it must not repeat
+the target `name`, whose source and link policy are owned by
+`extension_config`. Distributed scan and write protocol versions remain owned
+by the extension's C++ registrations and the runtime capability manifest.
 
 ## Local native lane
 
@@ -78,6 +81,11 @@ Set the vcpkg toolchain used by the extension, then run:
 export VCPKG_TOOLCHAIN_PATH=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake
 make vane_ci
 ```
+
+Before either build lane starts, `vane_verify_vcpkg` requires the toolchain to
+come from a clean Git checkout at the manifest's exact vcpkg revision. A
+different revision, nonstandard toolchain location, or non-Git installation is
+rejected.
 
 Before validation or source preparation, `vane_verify_ci_tools` compares this
 checkout with the exact submodule gitlink committed in the extension's `HEAD`.
@@ -169,11 +177,11 @@ with `contents: read` alone. The verified wheel is uploaded as
 `vane-<extension-name>-wheel`, and the workflow uses no deployment secrets.
 
 The native and wheel lanes keep separate, bounded 750 MiB `ccache` directories.
-Their cache keys include the runner, vcpkg triplet, and exact Vane revision, so
-a Vane revision change starts a new compiler cache without sharing a parallel
-lane's write. The workflow explicitly passes `ccache` as CMake's C and C++
-compiler launcher, reports both the Actions cache restore result and per-run
-`ccache` statistics, and never caches a CMake build directory or a
+Their cache keys include the runner, vcpkg triplet, and exact Vane and vcpkg
+revisions, so either source change starts a new compiler cache without sharing
+a parallel lane's write. The workflow explicitly passes `ccache` as CMake's C
+and C++ compiler launcher, reports both the Actions cache restore result and
+per-run `ccache` statistics, and never caches a CMake build directory or a
 `vcpkg_installed` tree. `lukka/run-vcpkg` remains responsible for vcpkg's binary
 package cache.
 
