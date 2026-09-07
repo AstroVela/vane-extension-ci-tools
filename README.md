@@ -229,6 +229,8 @@ gitlink as the native integration):
 ```bash
 python -m pip install -r vane-extension-ci-tools/requirements-release.txt
 python -I vane-extension-ci-tools/scripts/vane_provider_release.py validate \
+  --manifest vane-extension.toml --extension-root . \
+  --vane-source ../vane --ci-tools-version "$CI_TOOLS_REVISION" \
   --config vane-provider-release.toml \
   --directory dist/providers \
   --vane-version 0.2.0.dev612 \
@@ -244,6 +246,17 @@ limit. The limit is an index/project setting, **not** a replacement for Vane's
 native artifact safety budgets. Only top-level `*.whl` files are considered;
 upload that same wheel set without changing it after validation.
 
+Both commands require the native integration manifest, its extension root, an
+existing Vane checkout, and the expected full CI-tools commit SHA. Set
+`CI_TOOLS_REVISION` to the reviewed pin (for a submodule integration, the
+committed `HEAD:vane-extension-ci-tools` gitlink). The gate reuses the native
+tooling to validate the manifest's full Vane SHA, verify that both revisions
+are available from the official repositories, and reject wrong or dirty
+checkouts before accepting artifacts or writing outputs. A shallow Vane
+checkout is sufficient here: release assembly does not derive an engine
+version or build native code. These are read-only source checks; the gate
+does not prepare, reset or replace checkouts.
+
 Standard output is JSON with `vane_version` and `<provider>_version` keys. The
 optional GitHub output file receives the same keys only after all checks succeed.
 Before upload, an absent version or an existing byte-identical subset is allowed
@@ -253,6 +266,8 @@ After upload, check each provider against its exact local wheel matrix:
 
 ```bash
 python -I vane-extension-ci-tools/scripts/vane_provider_release.py verify-index \
+  --manifest vane-extension.toml --extension-root . \
+  --vane-source ../vane --ci-tools-version "$CI_TOOLS_REVISION" \
   --config vane-provider-release.toml \
   --directory dist/providers \
   --provider iceberg \

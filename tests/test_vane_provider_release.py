@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
 import zipfile
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
@@ -110,59 +112,168 @@ class ReleaseTests(unittest.TestCase):
             ]
         }
 
+    def cli_arguments(self) -> list[str]:
+        return [
+            "validate",
+            "--config",
+            str(self.config_path),
+            "--directory",
+            str(self.root),
+            "--vane-version",
+            VANE_VERSION,
+            "--github-output",
+            str(self.root / "outputs"),
+            "--manifest",
+            str(self.root / "vane-extension.toml"),
+            "--extension-root",
+            str(self.root),
+            "--vane-source",
+            str(self.root / "vane"),
+            "--ci-tools-version",
+            "a" * 40,
+        ]
+
     def test_single_provider_and_cli_outputs(self) -> None:
         self.release()
         self.assertEqual(self.validate(), {"paimon": PROVIDER_VERSION})
-        outputs = self.root / "outputs"
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-I",
-                str(SCRIPT),
-                "validate",
-                "--config",
-                str(self.config_path),
-                "--directory",
-                str(self.root),
-                "--vane-version",
-                VANE_VERSION,
-                "--github-output",
-                str(outputs),
-            ],
-            text=True,
-            capture_output=True,
-            check=True,
+        output = io.StringIO()
+        with mock.patch.object(MODULE, "verify_sources") as verify, redirect_stdout(
+            output
+        ):
+            self.assertEqual(MODULE.main(self.cli_arguments()), 0)
+        verify.assert_called_once_with(
+            self.root / "vane-extension.toml", self.root, self.root / "vane", "a" * 40
         )
         expected = {"vane_version": VANE_VERSION, "paimon_version": PROVIDER_VERSION}
-        self.assertEqual(json.loads(result.stdout), expected)
+        self.assertEqual(json.loads(output.getvalue()), expected)
         self.assertEqual(
-            dict(line.split("=", 1) for line in outputs.read_text().splitlines()),
+            dict(
+                line.split("=", 1)
+                for line in (self.root / "outputs").read_text().splitlines()
+            ),
             expected,
         )
 
     def test_cli_failure_does_not_write_outputs(self) -> None:
-        outputs = self.root / "outputs"
-        result = subprocess.run(
+        error = io.StringIO()
+        with mock.patch.object(MODULE, "verify_sources"), redirect_stderr(error):
+            self.assertEqual(MODULE.main(self.cli_arguments()), 2)
+        self.assertIn("provider set", error.getvalue())
+        self.assertFalse((self.root / "outputs").exists())
+
+    def test_cli_requires_source_inputs(self) -> None:
+        for command in ("validate", "verify-index"):
+            result = subprocess.run(
+                (
+                    [
+                        sys.executable,
+                        "-I",
+                        str(SCRIPT),
+                        command,
+                        "--config",
+                        str(self.config_path),
+                        "--directory",
+                        str(self.root),
+                        "--vane-version",
+                        VANE_VERSION,
+                    ]
+                    if command == "validate"
+                    else [
+                        sys.executable,
+                        "-I",
+                        str(SCRIPT),
+                        command,
+                        "--config",
+                        str(self.config_path),
+                        "--directory",
+                        str(self.root),
+                        "--provider",
+                        "paimon",
+                        "--version",
+                        PROVIDER_VERSION,
+                    ]
+                ),
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 2)
+            for flag in (
+                "--manifest",
+                "--extension-root",
+                "--vane-source",
+                "--ci-tools-version",
+            ):
+                self.assertIn(flag, result.stderr)
+
+    def test_cli_source_failure_precedes_artifacts_index_and_outputs(self) -> None:
+        with mock.patch.object(
+            MODULE,
+            "verify_sources",
+            side_effect=MODULE.ReleaseValidationError("dirty source"),
+        ), mock.patch.object(MODULE, "validate_release") as validate, mock.patch.object(
+            MODULE, "_request_json"
+        ) as request, redirect_stderr(
+            io.StringIO()
+        ):
+            self.assertEqual(MODULE.main(self.cli_arguments()), 2)
+        validate.assert_not_called()
+        request.assert_not_called()
+        self.assertFalse((self.root / "outputs").exists())
+
+    def test_source_gate_reuses_exact_native_verifiers(self) -> None:
+        native = mock.Mock()
+        native.ConfigurationError = RuntimeError
+        manifest = native.load_manifest.return_value
+        with mock.patch.object(MODULE, "_load_source_tools", return_value=native):
+            MODULE.verify_sources(
+                self.root / "vane-extension.toml",
+                self.root,
+                self.root / "vane",
+                "a" * 40,
+            )
+        self.assertEqual(
+            native.mock_calls,
             [
-                sys.executable,
-                "-I",
-                str(SCRIPT),
-                "validate",
-                "--config",
-                str(self.config_path),
-                "--directory",
-                str(self.root),
-                "--vane-version",
-                VANE_VERSION,
-                "--github-output",
-                str(outputs),
+                mock.call.load_manifest(self.root / "vane-extension.toml", self.root),
+                mock.call.verify_ci_tools_checkout(
+                    SCRIPT.resolve().parents[1], "a" * 40
+                ),
+                mock.call.verify_official_vane_revision(manifest),
+                mock.call.verify_vane_checkout(
+                    self.root / "vane", manifest, require_complete_history=False
+                ),
             ],
-            text=True,
-            capture_output=True,
         )
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("provider set", result.stderr)
-        self.assertFalse(outputs.exists())
+
+    def test_source_gate_propagates_pin_and_checkout_failures(self) -> None:
+        native = MODULE._load_source_tools()
+        for sha in ("main", "A" * 40, "123"):
+            with self.subTest(sha=sha), mock.patch.object(
+                MODULE, "_load_source_tools", return_value=native
+            ), mock.patch.object(native, "load_manifest"), self.assertRaisesRegex(
+                MODULE.ReleaseValidationError, "full lowercase"
+            ):
+                MODULE.verify_sources(
+                    self.root / "manifest", self.root, self.root / "vane", sha
+                )
+        for step in (
+            "verify_ci_tools_checkout",
+            "verify_official_vane_revision",
+            "verify_vane_checkout",
+        ):
+            fake = mock.Mock()
+            fake.ConfigurationError = native.ConfigurationError
+            getattr(fake, step).side_effect = native.ConfigurationError(
+                "revision or checkout mismatch"
+            )
+            with self.subTest(step=step), mock.patch.object(
+                MODULE, "_load_source_tools", return_value=fake
+            ), self.assertRaisesRegex(
+                MODULE.ReleaseValidationError, "revision or checkout mismatch"
+            ):
+                MODULE.verify_sources(
+                    self.root / "manifest", self.root, self.root / "vane", "a" * 40
+                )
 
     def test_multi_provider_graph_uses_complete_transitive_closure(self) -> None:
         with self.config_path.open("a") as output:

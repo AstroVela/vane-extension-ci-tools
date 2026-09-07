@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
+import subprocess
 import sys
 import time
 import tomllib
@@ -40,6 +42,44 @@ MAX_INDEX_BYTES = 4 * 1024 * 1024
 
 class ReleaseValidationError(RuntimeError):
     """A release configuration, wheel matrix, or indexed file set is invalid."""
+
+
+def _load_source_tools():
+    path = Path(__file__).resolve().with_name("vane_extension.py")
+    spec = importlib.util.spec_from_file_location("_vane_release_source_tools", path)
+    if spec is None or spec.loader is None:
+        raise ReleaseValidationError(f"cannot load source verification tools: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def verify_sources(
+    manifest_path: Path,
+    extension_root: Path,
+    vane_source: Path,
+    ci_tools_version: str,
+) -> None:
+    """Reuse the native lane's exact official source and clean-checkout gates."""
+    source_tools = _load_source_tools()
+    try:
+        manifest = source_tools.load_manifest(
+            manifest_path.resolve(), extension_root.resolve()
+        )
+        source_tools.verify_ci_tools_checkout(
+            Path(__file__).resolve().parents[1], ci_tools_version
+        )
+        source_tools.verify_official_vane_revision(manifest)
+        # No build/version derivation happens here, so a clean shallow checkout
+        # of the exact official Vane commit is sufficient for release assembly.
+        source_tools.verify_vane_checkout(
+            vane_source.resolve(), manifest, require_complete_history=False
+        )
+    except (source_tools.ConfigurationError, subprocess.CalledProcessError) as error:
+        raise ReleaseValidationError(
+            f"release source verification failed: {error}"
+        ) from error
 
 
 @dataclass(frozen=True)
@@ -453,7 +493,7 @@ def require_index_match(
     raise ReleaseValidationError(last_problem)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     validate = subparsers.add_parser(
@@ -472,8 +512,18 @@ def main() -> int:
     for command in (validate, verify):
         command.add_argument("--config", required=True, type=Path)
         command.add_argument("--directory", required=True, type=Path)
-    arguments = parser.parse_args()
+        command.add_argument("--manifest", required=True, type=Path)
+        command.add_argument("--extension-root", required=True, type=Path)
+        command.add_argument("--vane-source", required=True, type=Path)
+        command.add_argument("--ci-tools-version", required=True)
+    arguments = parser.parse_args(argv)
     try:
+        verify_sources(
+            arguments.manifest,
+            arguments.extension_root,
+            arguments.vane_source,
+            arguments.ci_tools_version,
+        )
         config = load_config(arguments.config)
         directory = arguments.directory.expanduser().resolve()
         if arguments.command == "validate":
