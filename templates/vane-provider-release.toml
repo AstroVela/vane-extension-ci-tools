@@ -1,0 +1,9 @@
+# Run this release gate with Python 3.11+, independently of wheel interpreters.
+interpreters = ["cp310", "cp311", "cp312", "cp313", "cp314"]
+platforms = ["manylinux_2_28_x86_64"]
+# Index/project upload limit in bytes; independent of Vane's artifact budgets.
+max_wheel_bytes = 100000000
+
+[providers.extension_name]
+distribution = "vane-extension-name"
+dependencies = []

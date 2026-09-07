@@ -188,11 +188,114 @@ package cache. After bootstrapping, each lane validates that run-vcpkg's
 exact vcpkg revision, removes only that marker, and requires the vcpkg checkout to
 be clean before the extension build starts.
 
+## Provider release validation
+
+The native build layer above and the dynamic provider release gate are separate.
+DuckDB's upstream [distribution workflow](https://github.com/duckdb/extension-ci-tools/blob/c67b0681a594af88529ad4dd06ed874b91b1a198/.github/workflows/_extension_distribution.yml)
+already supports repository/ref overrides, toolchains and platform matrices.
+Keep using upstream extension Make targets and tooling for those generic tasks;
+do not copy its binary deployment implementation here. Vane-specific source
+identity and Python provider release contracts belong in this repository.
+
+`scripts/vane_provider_release.py` replaces per-extension copies of release
+matrix and TestPyPI hash validation. It uses the Python Packaging Authority's
+`packaging` library for versions, requirements and wheel filenames. It requires
+Python 3.11+ to run, independently of the interpreters targeted by the wheels.
+
+Copy [`templates/vane-provider-release.toml`](templates/vane-provider-release.toml)
+into the extension repository. Declare the complete interpreter/platform matrix,
+the actual index/project upload limit in bytes, and each provider's distribution
+name and direct dependencies. All dependencies must be providers in that same
+candidate set. Unknown fields, duplicate identities and cycles are errors.
+For a two-provider graph, for example:
+
+```toml
+interpreters = ["cp310", "cp311", "cp312", "cp313", "cp314"]
+platforms = ["manylinux_2_28_x86_64"]
+max_wheel_bytes = 100000000
+
+[providers.avro]
+distribution = "vane-extension-avro"
+dependencies = []
+
+[providers.iceberg]
+distribution = "vane-extension-iceberg"
+dependencies = ["avro"]
+```
+
+Run against an exact, reviewed checkout of these tools (use the same committed
+gitlink as the native integration):
+
+```bash
+python -m pip install -r vane-extension-ci-tools/requirements-release.txt
+python -I vane-extension-ci-tools/scripts/vane_provider_release.py validate \
+  --manifest vane-extension.toml --extension-root . \
+  --vane-source ../vane --ci-tools-version "$CI_TOOLS_REVISION" \
+  --config vane-provider-release.toml \
+  --directory dist/providers \
+  --vane-version 0.2.0.dev612 \
+  --require-testpypi-publishable \
+  --github-output "$GITHUB_OUTPUT"
+```
+
+This gate currently targets no-tag TestPyPI development candidates. It requires
+one wheel per declared interpreter/platform pair, one immutable version per
+provider, exact `===` dependencies on Vane and the full transitive provider
+closure, matching filename/METADATA identities, and the configured upload size
+limit. The limit is an index/project setting, **not** a replacement for Vane's
+native artifact safety budgets. Only top-level `*.whl` files are considered;
+upload that same wheel set without changing it after validation.
+
+Both commands require the native integration manifest, its extension root, an
+existing Vane checkout, and the expected full CI-tools commit SHA. Set
+`CI_TOOLS_REVISION` to the reviewed pin (for a submodule integration, the
+committed `HEAD:vane-extension-ci-tools` gitlink). The gate reuses the native
+tooling to validate the manifest's full Vane SHA, verify that both revisions
+are available from the official repositories, and reject wrong or dirty
+checkouts before accepting artifacts or writing outputs. A shallow Vane
+checkout is sufficient here: release assembly does not derive an engine
+version or build native code. These are read-only source checks; the gate
+does not prepare, reset or replace checkouts.
+
+Standard output is JSON with `vane_version` and `<provider>_version` keys. The
+optional GitHub output file receives the same keys only after all checks succeed.
+Before upload, an absent version or an existing byte-identical subset is allowed
+for immutable retries. Conflicting, extra, malformed or yanked indexed files
+fail validation; a network/server error is never treated as an absent version.
+After upload, check each provider against its exact local wheel matrix:
+
+```bash
+python -I vane-extension-ci-tools/scripts/vane_provider_release.py verify-index \
+  --manifest vane-extension.toml --extension-root . \
+  --vane-source ../vane --ci-tools-version "$CI_TOOLS_REVISION" \
+  --config vane-provider-release.toml \
+  --directory dist/providers \
+  --provider iceberg \
+  --version "$ICEBERG_VERSION"
+```
+
+Post-upload verification retries a bounded number of times and requires all
+filenames and SHA-256 digests to match, not merely that the version exists.
+It does not upload, install packages, load extensions or use signing secrets.
+
+This release gate is **not** a replacement for the exact Vane checkout's
+`scripts/build_extension_wheel.py` and `scripts/verify_extension_wheel.py`:
+descriptor, trust/signature, SourceID, ELF, license, archive safety and clean
+runtime verification remain there. Extension-specific native builders and local
+and two-worker Ray smoke tests remain in the extension repositories.
+
+Keep the final TestPyPI upload job in the top-level publisher workflow. PyPI
+[does not currently support a reusable workflow as a Trusted Publisher](https://docs.pypi.org/trusted-publishers/troubleshooting/#reusable-workflows-on-github).
+Sharing these checks does not require moving signing keys, environments or
+publisher registrations. A central release coordinator, reusable build adapters
+and migration of additional extensions can build on this gate separately.
+
 ## Development
 
 Run the self-contained test suite with Python 3.11 or newer:
 
 ```bash
+python -m pip install -r requirements-release.txt
 python -m unittest discover -s tests -v
-python -m py_compile scripts/vane_extension.py tests/test_vane_extension.py
+python -m compileall -q scripts tests
 ```
