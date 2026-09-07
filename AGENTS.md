@@ -16,6 +16,7 @@ deployment implementation here.
 ## Tests
 
 ```bash
+python -m pip install -r requirements-release.txt
 python -m unittest discover -s tests -v
-python -m py_compile scripts/vane_extension.py tests/test_vane_extension.py
+python -m compileall -q scripts tests
 ```
