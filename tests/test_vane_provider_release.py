@@ -81,11 +81,13 @@ class ReleaseTests(unittest.TestCase):
         return tuple(self.wheel(interpreter, **kwargs) for interpreter in INTERPRETERS)
 
     def validate(self) -> dict[str, str]:
-        return MODULE.validate_release(self.root, VANE_VERSION, self.config)
+        return MODULE.validate_release(
+            self.root, VANE_VERSION, self.config, channel="testpypi-dev"
+        )
 
     def publishable(self) -> None:
         MODULE.require_indexes_publishable(
-            self.root, {"paimon": PROVIDER_VERSION}, self.config
+            self.root, {"paimon": PROVIDER_VERSION}, self.config, index="testpypi"
         )
 
     def verify(self, *, attempts: int = 1, delay: int = 0) -> None:
@@ -94,6 +96,7 @@ class ReleaseTests(unittest.TestCase):
             "paimon",
             PROVIDER_VERSION,
             self.config,
+            index="testpypi",
             attempts=attempts,
             delay_seconds=delay,
         )
@@ -115,6 +118,8 @@ class ReleaseTests(unittest.TestCase):
     def cli_arguments(self) -> list[str]:
         return [
             "validate",
+            "--channel",
+            "testpypi-dev",
             "--config",
             str(self.config_path),
             "--directory",
@@ -170,6 +175,8 @@ class ReleaseTests(unittest.TestCase):
                         "-I",
                         str(SCRIPT),
                         command,
+                        "--channel",
+                        "testpypi-dev",
                         "--config",
                         str(self.config_path),
                         "--directory",
@@ -183,6 +190,8 @@ class ReleaseTests(unittest.TestCase):
                         "-I",
                         str(SCRIPT),
                         command,
+                        "--index",
+                        "testpypi",
                         "--config",
                         str(self.config_path),
                         "--directory",
@@ -372,7 +381,9 @@ class ReleaseTests(unittest.TestCase):
             with self.subTest(version=version), self.assertRaises(
                 MODULE.ReleaseValidationError
             ):
-                MODULE.validate_release(self.root, version, self.config)
+                MODULE.validate_release(
+                    self.root, version, self.config, channel="testpypi-dev"
+                )
 
     def test_rejects_missing_extra_duplicate_or_wrong_tag_wheels(self) -> None:
         paths = self.release()
@@ -566,28 +577,435 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(
             MODULE.ReleaseValidationError, "every configured provider"
         ):
-            MODULE.require_indexes_publishable(self.root, {}, self.config)
+            MODULE.require_indexes_publishable(
+                self.root, {}, self.config, index="testpypi"
+            )
 
     def test_http_request_has_timeout_and_response_bound(self) -> None:
         response = mock.MagicMock()
         response.status = 200
         response.read.return_value = b'{"urls": []}'
         response.__enter__.return_value = response
-        with mock.patch.object(
-            MODULE.urllib.request, "urlopen", return_value=response
-        ) as request:
+        with mock.patch.object(MODULE.urllib.request, "build_opener") as build:
+            request = build.return_value.open
+            request.return_value = response
             self.assertEqual(
                 MODULE._request_json("https://test.pypi.org/pypi/example/1/json"),
                 (200, {"urls": []}),
             )
+        self.assertIsInstance(build.call_args.args[0], MODULE._NoRedirect)
         self.assertEqual(request.call_args.kwargs["timeout"], 30)
         response.read.assert_called_once_with(MODULE.MAX_INDEX_BYTES + 1)
         response.read.return_value = b"x" * (MODULE.MAX_INDEX_BYTES + 1)
-        with mock.patch.object(MODULE.urllib.request, "urlopen", return_value=response):
+        with mock.patch.object(MODULE.urllib.request, "build_opener") as build:
+            build.return_value.open.return_value = response
             with self.assertRaisesRegex(
                 MODULE.ReleaseValidationError, "response size limit"
             ):
                 MODULE._request_json("https://test.pypi.org/pypi/example/1/json")
+
+    def test_release_channels_accept_only_their_vane_versions(self) -> None:
+        for version in ("0.2.0.dev612", "0.2.0rc2.dev3"):
+            MODULE.validate_vane_version(version, "testpypi-dev")
+            with self.assertRaisesRegex(MODULE.ReleaseValidationError, "development"):
+                MODULE.validate_vane_version(version, "release")
+        for version in ("0.2.0", "0.2.0a1", "0.2.0b1", "0.2.0rc1", "0.2.1.post1"):
+            MODULE.validate_vane_version(version, "release")
+            with self.assertRaisesRegex(MODULE.ReleaseValidationError, "development"):
+                MODULE.validate_vane_version(version, "testpypi-dev")
+        for channel in MODULE.RELEASE_CHANNELS:
+            for version in ("0.2", "1!0.2.0", "0.2.0+local", "v0.2.0", "0.2.0\nx=y"):
+                with self.subTest(channel=channel, version=version), self.assertRaises(
+                    MODULE.ReleaseValidationError
+                ):
+                    MODULE.validate_vane_version(version, channel)
+        with self.assertRaisesRegex(MODULE.ReleaseValidationError, "unknown release"):
+            MODULE.validate_vane_version("0.2.0", "automatic")
+
+    def test_release_matrix_still_requires_the_exact_base_version(self) -> None:
+        self.release(requirements=("vane-ai===0.2.0",))
+        self.assertEqual(
+            MODULE.validate_release(self.root, "0.2.0", self.config, channel="release"),
+            {"paimon": PROVIDER_VERSION},
+        )
+        self.wheel("cp314", requirements=("vane-ai===0.2.1",))
+        with self.assertRaisesRegex(MODULE.ReleaseValidationError, "exactly require"):
+            MODULE.validate_release(self.root, "0.2.0", self.config, channel="release")
+
+    def test_both_indexes_use_exact_endpoints_and_the_same_immutable_checks(
+        self,
+    ) -> None:
+        paths = self.release()
+        provider = self.config.provider("paimon")
+        for index, base in MODULE.INDEX_JSON_BASES.items():
+            with self.subTest(index=index), mock.patch.object(
+                MODULE, "_request_json", return_value=(200, self.indexed(paths))
+            ) as request:
+                MODULE.require_indexes_publishable(
+                    self.root, {"paimon": PROVIDER_VERSION}, self.config, index=index
+                )
+                MODULE.require_index_match(
+                    self.root,
+                    "paimon",
+                    PROVIDER_VERSION,
+                    self.config,
+                    index=index,
+                    attempts=1,
+                    delay_seconds=0,
+                )
+                expected = f"{base}/vane-extension-paimon/{PROVIDER_VERSION}/json"
+                self.assertEqual(request.call_args_list, [mock.call(expected)] * 2)
+                self.assertEqual(
+                    MODULE._index_url(provider, PROVIDER_VERSION, index), expected
+                )
+            for status in (301, 302, 403, 429, 500):
+                with mock.patch.object(
+                    MODULE, "_request_json", return_value=(status, None)
+                ):
+                    with self.assertRaises(MODULE.ReleaseValidationError):
+                        MODULE.require_indexes_publishable(
+                            self.root,
+                            {"paimon": PROVIDER_VERSION},
+                            self.config,
+                            index=index,
+                        )
+                    with self.assertRaises(MODULE.ReleaseValidationError):
+                        MODULE.require_index_match(
+                            self.root,
+                            "paimon",
+                            PROVIDER_VERSION,
+                            self.config,
+                            index=index,
+                            attempts=1,
+                            delay_seconds=0,
+                        )
+
+    def test_unknown_indexes_are_rejected_without_network_access(self) -> None:
+        self.release()
+        for index in ("auto", "PyPI", "https://pypi.org", "https://example.com"):
+            with self.subTest(index=index), mock.patch.object(
+                MODULE, "_request_json"
+            ) as request:
+                with self.assertRaisesRegex(
+                    MODULE.ReleaseValidationError, "unknown package index"
+                ):
+                    MODULE.require_indexes_publishable(
+                        self.root,
+                        {"paimon": PROVIDER_VERSION},
+                        self.config,
+                        index=index,
+                    )
+                with self.assertRaisesRegex(
+                    MODULE.ReleaseValidationError, "unknown package index"
+                ):
+                    MODULE.require_index_match(
+                        self.root,
+                        "paimon",
+                        PROVIDER_VERSION,
+                        self.config,
+                        index=index,
+                        attempts=1,
+                        delay_seconds=0,
+                    )
+                request.assert_not_called()
+
+    def test_http_redirects_never_switch_package_indexes(self) -> None:
+        handler = MODULE._NoRedirect()
+        for status in (301, 302, 303, 307, 308):
+            with self.subTest(status=status), self.assertRaisesRegex(
+                MODULE.ReleaseValidationError, "redirects are not allowed"
+            ):
+                handler.redirect_request(
+                    mock.Mock(),
+                    mock.Mock(),
+                    status,
+                    "redirect",
+                    {},
+                    "https://pypi.org/pypi/example/1/json",
+                )
+
+    def test_promotion_checks_complete_staging_before_pypi(self) -> None:
+        paths = self.release(requirements=("vane-ai===0.2.0",))
+        for published in (
+            (404, None),
+            (200, self.indexed(paths[:1])),
+            (200, self.indexed(paths)),
+        ):
+            with self.subTest(published=published), mock.patch.object(
+                MODULE,
+                "_request_json",
+                side_effect=[(200, self.indexed(paths)), published],
+            ) as request:
+                self.assertEqual(
+                    MODULE.verify_promotion(
+                        self.root, "0.2.0", self.config, attempts=1, delay_seconds=0
+                    ),
+                    {"paimon": PROVIDER_VERSION},
+                )
+                self.assertEqual(
+                    request.call_args_list,
+                    [
+                        mock.call(
+                            f"https://test.pypi.org/pypi/vane-extension-paimon/{PROVIDER_VERSION}/json"
+                        ),
+                        mock.call(
+                            f"https://pypi.org/pypi/vane-extension-paimon/{PROVIDER_VERSION}/json"
+                        ),
+                    ],
+                )
+
+    def test_promotion_rejects_missing_partial_changed_or_yanked_staging(self) -> None:
+        paths = self.release(requirements=("vane-ai===0.2.0",))
+        changed = self.indexed(paths)
+        changed["urls"][0]["digests"]["sha256"] = "0" * 64
+        yanked = self.indexed(paths)
+        yanked["urls"][0]["yanked"] = True
+        for staged in (
+            (404, None),
+            (503, None),
+            (200, self.indexed(paths[:1])),
+            (200, changed),
+            (200, yanked),
+        ):
+            with self.subTest(staged=staged), mock.patch.object(
+                MODULE, "_request_json", return_value=staged
+            ) as request, self.assertRaises(MODULE.ReleaseValidationError):
+                MODULE.verify_promotion(
+                    self.root, "0.2.0", self.config, attempts=1, delay_seconds=0
+                )
+            self.assertEqual(request.call_count, 1)
+            self.assertTrue(
+                request.call_args.args[0].startswith("https://test.pypi.org/")
+            )
+
+    def test_promotion_rejects_conflicting_pypi_files(self) -> None:
+        paths = self.release(requirements=("vane-ai===0.2.0",))
+        conflict = self.indexed(paths)
+        conflict["urls"][0]["digests"]["sha256"] = "0" * 64
+        with mock.patch.object(
+            MODULE,
+            "_request_json",
+            side_effect=[(200, self.indexed(paths)), (200, conflict)],
+        ), self.assertRaisesRegex(MODULE.ReleaseValidationError, "conflict"):
+            MODULE.verify_promotion(
+                self.root, "0.2.0", self.config, attempts=1, delay_seconds=0
+            )
+
+    def test_promotion_uses_one_snapshot_and_rejects_local_changes(self) -> None:
+        for change in ("replace", "add", "remove", "symlink"):
+            with self.subTest(change=change):
+                temporary = tempfile.TemporaryDirectory()
+                self.addCleanup(temporary.cleanup)
+                self.root = Path(temporary.name)
+                paths = self.release(requirements=("vane-ai===0.2.0",))
+                staged = self.indexed(paths)
+
+                def respond(url):
+                    if url.startswith("https://test.pypi.org/"):
+                        return 200, staged
+                    if change == "replace":
+                        self.wheel(
+                            "cp314",
+                            requirements=("vane-ai===0.2.0",),
+                            extra_metadata="X-Changed: true\n",
+                        )
+                    elif change == "add":
+                        self.wheel(
+                            "cp314",
+                            name="unexpected",
+                            requirements=("vane-ai===0.2.0",),
+                        )
+                    elif change == "remove":
+                        paths[-1].unlink()
+                    else:
+                        target = paths[-1].with_suffix(".saved")
+                        paths[-1].rename(target)
+                        paths[-1].symlink_to(target)
+                    return 404, None
+
+                with mock.patch.object(
+                    MODULE, "_request_json", side_effect=respond
+                ), self.assertRaises(MODULE.ReleaseValidationError):
+                    MODULE.verify_promotion(
+                        self.root, "0.2.0", self.config, attempts=1, delay_seconds=0
+                    )
+
+    def test_promotion_requires_all_providers_staged_before_checking_any_pypi(
+        self,
+    ) -> None:
+        self.config = replace(
+            self.config,
+            providers=(
+                MODULE.Provider("avro", "vane-extension-avro", ()),
+                MODULE.Provider("iceberg", "vane-extension-iceberg", ("avro",)),
+            ),
+        )
+        avro_version = "0.2.0.456"
+        avro = self.release(
+            name="avro", version=avro_version, requirements=("vane-ai===0.2.0",)
+        )
+        iceberg = self.release(
+            name="iceberg",
+            requirements=("vane-ai===0.2.0", f"vane-extension-avro==={avro_version}"),
+        )
+        for staged_iceberg in (iceberg[:1], iceberg):
+            with mock.patch.object(
+                MODULE,
+                "_request_json",
+                side_effect=[
+                    (200, self.indexed(avro)),
+                    (200, self.indexed(staged_iceberg)),
+                    (404, None),
+                    (404, None),
+                ],
+            ) as request:
+                if staged_iceberg == iceberg:
+                    self.assertEqual(
+                        MODULE.verify_promotion(
+                            self.root, "0.2.0", self.config, attempts=1, delay_seconds=0
+                        ),
+                        {"avro": avro_version, "iceberg": PROVIDER_VERSION},
+                    )
+                else:
+                    with self.assertRaises(MODULE.ReleaseValidationError):
+                        MODULE.verify_promotion(
+                            self.root, "0.2.0", self.config, attempts=1, delay_seconds=0
+                        )
+                expected_calls = [
+                    mock.call(
+                        f"https://test.pypi.org/pypi/vane-extension-avro/{avro_version}/json"
+                    ),
+                    mock.call(
+                        f"https://test.pypi.org/pypi/vane-extension-iceberg/{PROVIDER_VERSION}/json"
+                    ),
+                ]
+                if staged_iceberg == iceberg:
+                    expected_calls += [
+                        mock.call(
+                            f"https://pypi.org/pypi/vane-extension-avro/{avro_version}/json"
+                        ),
+                        mock.call(
+                            f"https://pypi.org/pypi/vane-extension-iceberg/{PROVIDER_VERSION}/json"
+                        ),
+                    ]
+                self.assertEqual(request.call_args_list, expected_calls)
+
+    def test_promotion_rejects_dev_and_wrong_base_dependencies_before_network(
+        self,
+    ) -> None:
+        self.release()
+        with mock.patch.object(MODULE, "_request_json") as request:
+            for version in (VANE_VERSION, "0.2.0"):
+                with self.subTest(version=version), self.assertRaises(
+                    MODULE.ReleaseValidationError
+                ):
+                    MODULE.verify_promotion(
+                        self.root, version, self.config, attempts=1, delay_seconds=0
+                    )
+            request.assert_not_called()
+
+    def test_cli_dev_candidates_cannot_target_pypi(self) -> None:
+        self.release()
+        arguments = self.cli_arguments() + ["--require-publishable-on", "pypi"]
+        with mock.patch.object(MODULE, "verify_sources") as sources, mock.patch.object(
+            MODULE, "_request_json"
+        ) as request, redirect_stderr(io.StringIO()):
+            self.assertEqual(MODULE.main(arguments), 2)
+        sources.assert_not_called()
+        request.assert_not_called()
+        self.assertFalse((self.root / "outputs").exists())
+
+    def test_cli_validates_both_indexes_for_a_release(self) -> None:
+        self.release(requirements=("vane-ai===0.2.0",))
+        arguments = self.cli_arguments()
+        arguments[arguments.index("--channel") + 1] = "release"
+        arguments[arguments.index("--vane-version") + 1] = "0.2.0"
+        arguments += [
+            "--require-publishable-on",
+            "testpypi",
+            "--require-publishable-on",
+            "pypi",
+        ]
+        with mock.patch.object(MODULE, "verify_sources"), mock.patch.object(
+            MODULE, "_request_json", return_value=(404, None)
+        ) as request, redirect_stdout(io.StringIO()):
+            self.assertEqual(MODULE.main(arguments), 0)
+        self.assertEqual(request.call_count, 2)
+        self.assertTrue((self.root / "outputs").exists())
+
+    def test_cli_verify_index_selects_the_explicit_index(self) -> None:
+        paths = self.release()
+        arguments = self.cli_arguments()
+        arguments[0] = "verify-index"
+        for option in ("--channel", "--vane-version", "--github-output"):
+            position = arguments.index(option)
+            del arguments[position : position + 2]
+        arguments += [
+            "--provider",
+            "paimon",
+            "--version",
+            PROVIDER_VERSION,
+            "--attempts",
+            "1",
+        ]
+        for index, base in MODULE.INDEX_JSON_BASES.items():
+            with mock.patch.object(
+                MODULE, "verify_sources"
+            ) as sources, mock.patch.object(
+                MODULE, "_request_json", return_value=(200, self.indexed(paths))
+            ) as request:
+                self.assertEqual(MODULE.main(arguments + ["--index", index]), 0)
+            sources.assert_called_once()
+            request.assert_called_once_with(
+                f"{base}/vane-extension-paimon/{PROVIDER_VERSION}/json"
+            )
+        self.assertFalse((self.root / "outputs").exists())
+
+    def test_cli_requires_explicit_channel_index_and_promotion_sources(self) -> None:
+        validate = self.cli_arguments()
+        channel_position = validate.index("--channel")
+        del validate[channel_position : channel_position + 2]
+        for arguments, required in (
+            (validate, ("--channel",)),
+            (["verify-index"], ("--index",)),
+            (
+                ["verify-promotion"],
+                (
+                    "--vane-version",
+                    "--manifest",
+                    "--extension-root",
+                    "--vane-source",
+                    "--ci-tools-version",
+                ),
+            ),
+        ):
+            error = io.StringIO()
+            with redirect_stderr(error), self.assertRaises(SystemExit) as result:
+                MODULE.main(arguments)
+            self.assertEqual(result.exception.code, 2)
+            for flag in required:
+                self.assertIn(flag, error.getvalue())
+
+    def test_cli_promotion_writes_outputs_only_after_all_gates(self) -> None:
+        paths = self.release(requirements=("vane-ai===0.2.0",))
+        arguments = self.cli_arguments()
+        arguments[0] = "verify-promotion"
+        channel_position = arguments.index("--channel")
+        del arguments[channel_position : channel_position + 2]
+        arguments[arguments.index("--vane-version") + 1] = "0.2.0"
+        arguments += ["--attempts", "1", "--delay-seconds", "0"]
+        with mock.patch.object(MODULE, "verify_sources"), mock.patch.object(
+            MODULE, "_request_json", return_value=(404, None)
+        ), redirect_stderr(io.StringIO()):
+            self.assertEqual(MODULE.main(arguments), 2)
+        self.assertFalse((self.root / "outputs").exists())
+        with mock.patch.object(MODULE, "verify_sources"), mock.patch.object(
+            MODULE,
+            "_request_json",
+            side_effect=[(200, self.indexed(paths)), (404, None)],
+        ), redirect_stdout(io.StringIO()):
+            self.assertEqual(MODULE.main(arguments), 0)
+        self.assertIn("vane_version=0.2.0\n", (self.root / "outputs").read_text())
 
 
 if __name__ == "__main__":

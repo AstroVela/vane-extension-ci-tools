@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Vane contributors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Validate immutable provider release sets and their TestPyPI file identities.
+"""Validate immutable provider release sets and package-index file identities.
 
 This is a release-matrix gate, not an artifact security verifier. The exact
 Vane checkout's build_extension_wheel.py and verify_extension_wheel.py must
@@ -34,7 +34,11 @@ from packaging.tags import Tag
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
 
-TESTPYPI_JSON_BASE = "https://test.pypi.org/pypi"
+INDEX_JSON_BASES = {
+    "testpypi": "https://test.pypi.org/pypi",
+    "pypi": "https://pypi.org/pypi",
+}
+RELEASE_CHANNELS = ("testpypi-dev", "release")
 MAX_METADATA_BYTES = 1024 * 1024
 MAX_INDEX_BYTES = 4 * 1024 * 1024
 
@@ -215,6 +219,24 @@ def _canonical_version(value: str, description: str) -> str:
     return value
 
 
+def validate_vane_version(value: str, channel: str) -> None:
+    """Keep development candidates separate from tagged public releases."""
+    if channel not in RELEASE_CHANNELS:
+        raise ReleaseValidationError(f"unknown release channel: {channel}")
+    _canonical_version(value, "Vane version")
+    version = Version(value)
+    if version.epoch != 0 or len(version.release) != 3:
+        raise ReleaseValidationError("Vane version must use X.Y.Z without an epoch")
+    if channel == "testpypi-dev" and not version.is_devrelease:
+        raise ReleaseValidationError(
+            "Vane TestPyPI development candidate must have a development version"
+        )
+    if channel == "release" and version.is_devrelease:
+        raise ReleaseValidationError(
+            "Vane release channel forbids development versions"
+        )
+
+
 def _read_wheel(path: Path, config: ReleaseConfig) -> WheelRecord:
     if not path.is_file() or path.is_symlink():
         raise ReleaseValidationError(f"{path.name} must be a regular wheel file")
@@ -311,14 +333,10 @@ def _require_matrix(
 
 
 def validate_release(
-    directory: Path, vane_version: str, config: ReleaseConfig
+    directory: Path, vane_version: str, config: ReleaseConfig, *, channel: str
 ) -> dict[str, str]:
     """Require a complete matrix with exact Vane and transitive provider dependencies."""
-    _canonical_version(vane_version, "Vane version")
-    if not Version(vane_version).is_devrelease:
-        raise ReleaseValidationError(
-            "Vane TestPyPI version must be a development release"
-        )
+    validate_vane_version(vane_version, channel)
     records = tuple(
         _read_wheel(path, config) for path in sorted(directory.glob("*.whl"))
     )
@@ -354,16 +372,22 @@ def validate_release(
     return versions
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        raise ReleaseValidationError("package-index redirects are not allowed")
+
+
 def _request_json(url: str) -> tuple[int, object | None]:
     request = urllib.request.Request(
         url, headers={"User-Agent": "vane-provider-release-validator/1"}
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        opener = urllib.request.build_opener(_NoRedirect())
+        with opener.open(request, timeout=30) as response:
             data = response.read(MAX_INDEX_BYTES + 1)
             if len(data) > MAX_INDEX_BYTES:
                 raise ReleaseValidationError(
-                    "TestPyPI JSON exceeds the response size limit"
+                    "package-index JSON exceeds the response size limit"
                 )
             return response.status, json.loads(data)
     except urllib.error.HTTPError as error:
@@ -371,7 +395,7 @@ def _request_json(url: str) -> tuple[int, object | None]:
             return error.code, None
     except (OSError, ValueError) as error:
         raise ReleaseValidationError(
-            f"TestPyPI query failed for {url}: {error}"
+            f"package-index query failed for {url}: {error}"
         ) from error
 
 
@@ -401,11 +425,11 @@ def _expected_wheel_hashes(
 
 def _indexed_wheel_hashes(document: object) -> dict[str, str]:
     if not isinstance(document, dict) or not isinstance(document.get("urls"), list):
-        raise ReleaseValidationError("TestPyPI returned malformed metadata")
+        raise ReleaseValidationError("package index returned malformed metadata")
     actual: dict[str, str] = {}
     for item in document["urls"]:
         if not isinstance(item, dict):
-            raise ReleaseValidationError("TestPyPI returned malformed files")
+            raise ReleaseValidationError("package index returned malformed files")
         filename = item.get("filename")
         digests = item.get("digests")
         digest = digests.get("sha256") if isinstance(digests, dict) else None
@@ -417,26 +441,53 @@ def _indexed_wheel_hashes(document: object) -> dict[str, str]:
             or item.get("yanked", False) is not False
         ):
             raise ReleaseValidationError(
-                "TestPyPI returned a non-wheel, yanked or malformed file"
+                "package index returned a non-wheel, yanked or malformed file"
             )
         if filename in actual:
-            raise ReleaseValidationError(f"TestPyPI returned duplicate file {filename}")
+            raise ReleaseValidationError(
+                f"package index returned duplicate file {filename}"
+            )
         actual[filename] = digest
     if not actual:
         raise ReleaseValidationError(
-            "TestPyPI returned an existing version without wheels"
+            "package index returned an existing version without wheels"
         )
     return actual
 
 
-def _index_url(provider: Provider, version: str) -> str:
-    return f"{TESTPYPI_JSON_BASE}/{urllib.parse.quote(provider.distribution, safe='')}/{urllib.parse.quote(version, safe='')}/json"
+def _index_base(index: str) -> str:
+    try:
+        return INDEX_JSON_BASES[index]
+    except KeyError:
+        raise ReleaseValidationError(f"unknown package index: {index}") from None
+
+
+def _index_url(provider: Provider, version: str, index: str) -> str:
+    return f"{_index_base(index)}/{urllib.parse.quote(provider.distribution, safe='')}/{urllib.parse.quote(version, safe='')}/json"
+
+
+def _require_publishable(
+    expected: dict[str, str], provider: Provider, version: str, index: str
+) -> None:
+    status, document = _request_json(_index_url(provider, version, index))
+    if status == 404:
+        return
+    if status != 200:
+        raise ReleaseValidationError(
+            f"expected absent or reusable {index} version {provider.distribution}=={version}, received HTTP {status}"
+        )
+    actual = _indexed_wheel_hashes(document)
+    if any(expected.get(filename) != digest for filename, digest in actual.items()):
+        raise ReleaseValidationError(
+            f"indexed wheel identities conflict for {provider.distribution}=={version}"
+        )
 
 
 def require_indexes_publishable(
-    directory: Path, versions: dict[str, str], config: ReleaseConfig
+    directory: Path, versions: dict[str, str], config: ReleaseConfig, *, index: str
 ) -> None:
     """Allow first publication or a byte-identical, possibly partial, rerun."""
+    _index_base(index)
     if set(versions) != {provider.name for provider in config.providers}:
         raise ReleaseValidationError(
             "publishable versions must cover every configured provider"
@@ -444,18 +495,7 @@ def require_indexes_publishable(
     for provider in config.providers:
         version = versions[provider.name]
         expected = _expected_wheel_hashes(directory, provider, version, config)
-        status, document = _request_json(_index_url(provider, version))
-        if status == 404:
-            continue
-        if status != 200:
-            raise ReleaseValidationError(
-                f"expected absent or reusable TestPyPI version {provider.distribution}=={version}, received HTTP {status}"
-            )
-        actual = _indexed_wheel_hashes(document)
-        if any(expected.get(filename) != digest for filename, digest in actual.items()):
-            raise ReleaseValidationError(
-                f"indexed wheel identities conflict for {provider.distribution}=={version}"
-            )
+        _require_publishable(expected, provider, version, index)
 
 
 def require_index_match(
@@ -464,17 +504,38 @@ def require_index_match(
     version: str,
     config: ReleaseConfig,
     *,
+    index: str,
     attempts: int,
     delay_seconds: int,
 ) -> None:
     """Wait for exactly the local matrix, not just a matching version number."""
+    _index_base(index)
+    provider = config.provider(provider_name)
+    expected = _expected_wheel_hashes(directory, provider, version, config)
+    _require_index_match(
+        expected,
+        provider,
+        version,
+        index,
+        attempts=attempts,
+        delay_seconds=delay_seconds,
+    )
+
+
+def _require_index_match(
+    expected: dict[str, str],
+    provider: Provider,
+    version: str,
+    index: str,
+    *,
+    attempts: int,
+    delay_seconds: int,
+) -> None:
     if attempts <= 0 or delay_seconds < 0:
         raise ReleaseValidationError(
             "index retry settings must be non-negative and include an attempt"
         )
-    provider = config.provider(provider_name)
-    expected = _expected_wheel_hashes(directory, provider, version, config)
-    url = _index_url(provider, version)
+    url = _index_url(provider, version, index)
     last_problem = "release was not indexed"
     for attempt in range(attempts):
         try:
@@ -484,7 +545,7 @@ def require_index_match(
                     return
                 last_problem = f"indexed wheel identities differ for {provider.distribution}=={version}"
             else:
-                last_problem = f"TestPyPI returned HTTP {status} for {url}"
+                last_problem = f"{index} returned HTTP {status} for {url}"
         except ReleaseValidationError as error:
             last_problem = str(error)
         if attempt + 1 < attempts:
@@ -492,23 +553,78 @@ def require_index_match(
     raise ReleaseValidationError(last_problem)
 
 
+def verify_promotion(
+    directory: Path,
+    vane_version: str,
+    config: ReleaseConfig,
+    *,
+    attempts: int,
+    delay_seconds: int,
+) -> dict[str, str]:
+    """Require the complete staged release before accepting an immutable PyPI upload."""
+    versions = validate_release(directory, vane_version, config, channel="release")
+    expected = {
+        provider.name: _expected_wheel_hashes(
+            directory, provider, versions[provider.name], config
+        )
+        for provider in config.providers
+    }
+    for provider in config.providers:
+        _require_index_match(
+            expected[provider.name],
+            provider,
+            versions[provider.name],
+            "testpypi",
+            attempts=attempts,
+            delay_seconds=delay_seconds,
+        )
+    for provider in config.providers:
+        _require_publishable(
+            expected[provider.name], provider, versions[provider.name], "pypi"
+        )
+    # Both indexes refer to one hash snapshot. Detect local replacement/addition
+    # during network checks; callers must also keep the files unchanged until upload.
+    validate_release(directory, vane_version, config, channel="release")
+    for provider in config.providers:
+        if (
+            _expected_wheel_hashes(directory, provider, versions[provider.name], config)
+            != expected[provider.name]
+        ):
+            raise ReleaseValidationError("local wheels changed during promotion checks")
+    return versions
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     validate = subparsers.add_parser(
-        "validate", help="validate a complete TestPyPI candidate set"
+        "validate", help="validate a complete development or tagged release set"
     )
+    validate.add_argument("--channel", required=True, choices=RELEASE_CHANNELS)
     validate.add_argument("--vane-version", required=True)
     validate.add_argument("--github-output", type=Path)
-    validate.add_argument("--require-testpypi-publishable", action="store_true")
+    validate.add_argument(
+        "--require-publishable-on",
+        action="append",
+        default=[],
+        choices=INDEX_JSON_BASES,
+    )
     verify = subparsers.add_parser(
         "verify-index", help="compare indexed files with the local provider matrix"
     )
     verify.add_argument("--provider", required=True)
     verify.add_argument("--version", required=True)
-    verify.add_argument("--attempts", default=5, type=int)
-    verify.add_argument("--delay-seconds", default=15, type=int)
-    for command in (validate, verify):
+    verify.add_argument("--index", required=True, choices=INDEX_JSON_BASES)
+    promotion = subparsers.add_parser(
+        "verify-promotion",
+        help="verify TestPyPI staging and immutable PyPI publication",
+    )
+    promotion.add_argument("--vane-version", required=True)
+    promotion.add_argument("--github-output", type=Path)
+    for command in (verify, promotion):
+        command.add_argument("--attempts", default=5, type=int)
+        command.add_argument("--delay-seconds", default=15, type=int)
+    for command in (validate, verify, promotion):
         command.add_argument("--config", required=True, type=Path)
         command.add_argument("--directory", required=True, type=Path)
         command.add_argument("--manifest", required=True, type=Path)
@@ -517,6 +633,12 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--ci-tools-version", required=True)
     arguments = parser.parse_args(argv)
     try:
+        if (
+            arguments.command == "validate"
+            and arguments.channel == "testpypi-dev"
+            and "pypi" in arguments.require_publishable_on
+        ):
+            raise ReleaseValidationError("development candidates cannot target PyPI")
         verify_sources(
             arguments.manifest,
             arguments.extension_root,
@@ -526,9 +648,31 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(arguments.config)
         directory = arguments.directory.expanduser().resolve()
         if arguments.command == "validate":
-            versions = validate_release(directory, arguments.vane_version, config)
-            if arguments.require_testpypi_publishable:
-                require_indexes_publishable(directory, versions, config)
+            versions = validate_release(
+                directory, arguments.vane_version, config, channel=arguments.channel
+            )
+            for index in dict.fromkeys(arguments.require_publishable_on):
+                require_indexes_publishable(directory, versions, config, index=index)
+        elif arguments.command == "verify-promotion":
+            versions = verify_promotion(
+                directory,
+                arguments.vane_version,
+                config,
+                attempts=arguments.attempts,
+                delay_seconds=arguments.delay_seconds,
+            )
+        else:
+            require_index_match(
+                directory,
+                arguments.provider,
+                arguments.version,
+                config,
+                index=arguments.index,
+                attempts=arguments.attempts,
+                delay_seconds=arguments.delay_seconds,
+            )
+            return 0
+        if arguments.command in ("validate", "verify-promotion"):
             outputs = {"vane_version": arguments.vane_version}
             outputs.update(
                 {f"{name}_version": version for name, version in versions.items()}
@@ -538,15 +682,6 @@ def main(argv: list[str] | None = None) -> int:
                     for name, value in outputs.items():
                         output.write(f"{name}={value}\n")
             print(json.dumps(outputs, sort_keys=True))
-        else:
-            require_index_match(
-                directory,
-                arguments.provider,
-                arguments.version,
-                config,
-                attempts=arguments.attempts,
-                delay_seconds=arguments.delay_seconds,
-            )
     except (ReleaseValidationError, ValueError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
