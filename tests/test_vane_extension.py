@@ -1137,6 +1137,7 @@ class VaneWheelTests(unittest.TestCase):
                         "PYTHONHOME": "/unsafe/home",
                         "PYTHONPATH": "/unsafe/path",
                         "VIRTUAL_ENV": "/unsafe/venv",
+                        "VANE_RUNNER": "ray",
                     },
                     clear=True,
                 ),
@@ -1148,6 +1149,7 @@ class VaneWheelTests(unittest.TestCase):
                     self.identity(),
                     root,
                 )
+                self.assertEqual(os.environ["VANE_RUNNER"], "ray")
 
             self.assertEqual(run_command.call_count, 3)
             for call in run_command.call_args_list:
@@ -1155,6 +1157,7 @@ class VaneWheelTests(unittest.TestCase):
                 self.assertNotIn("PYTHONHOME", environment)
                 self.assertNotIn("PYTHONPATH", environment)
                 self.assertNotIn("VIRTUAL_ENV", environment)
+                self.assertEqual(environment["VANE_RUNNER"], "local-fast")
             install_command = run_command.call_args_list[1].args[0]
             self.assertEqual(install_command[1:4], ["-m", "pip", "install"])
             self.assertEqual(install_command[-1], str(wheel))
