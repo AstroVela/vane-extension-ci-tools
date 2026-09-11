@@ -833,6 +833,8 @@ def verify_vane_wheel(
         verification_environment = os.environ.copy()
         for name in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"):
             verification_environment.pop(name, None)
+        # Installation metadata belongs to the local verification connection.
+        verification_environment["VANE_RUNNER"] = "local-fast"
         run(
             [sys.executable, "-m", "venv", str(environment_root)],
             env=verification_environment,
