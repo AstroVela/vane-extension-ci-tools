@@ -1354,6 +1354,48 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('test "$$(uname -m)" = "x86_64"', makefile)
         self.assertIn('test "$$(getconf LONG_BIT)" = "64"', makefile)
 
+    @unittest.skipUnless(sys.platform == "linux", "wheel lane is Linux-only")
+    def test_wheel_bootstrap_uses_target_triplet_for_host_tools(self) -> None:
+        if os.uname().machine != "x86_64":
+            self.skipTest("wheel lane requires x86_64")
+        makefile = Path(__file__).parents[1] / "makefiles/vane_extension.Makefile"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            (scripts / "bootstrap_vcpkg.sh").write_text(
+                "set -eu\n"
+                'test "$VCPKG_TARGET_TRIPLET" = x64-linux\n'
+                'test "$VCPKG_HOST_TRIPLET" = "$VCPKG_TARGET_TRIPLET"\n'
+                'printf done > "$1/bootstrap-completed"\n'
+            )
+            for host_triplet in (None, "x64-linux-release"):
+                with self.subTest(host_triplet=host_triplet):
+                    environment = os.environ.copy()
+                    environment.pop("VCPKG_HOST_TRIPLET", None)
+                    if host_triplet:
+                        environment["VCPKG_HOST_TRIPLET"] = host_triplet
+                    completed = root / "bootstrap-completed"
+                    completed.unlink(missing_ok=True)
+                    subprocess.run(
+                        [
+                            "make",
+                            "--file",
+                            str(makefile),
+                            "--old-file=vane_prepare",
+                            "--old-file=vane_verify_vcpkg",
+                            "vane_wheel_dependencies",
+                            f"VANE_EXTENSION_ROOT={root}",
+                            f"VANE_SOURCE_DIR={root}",
+                            "VCPKG_TARGET_TRIPLET=x64-linux",
+                        ],
+                        env=environment,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(completed.read_text(), "done")
+
     def test_make_passes_committed_ci_tools_gitlink_as_expected_sha(self) -> None:
         expected_sha = "a" * 40
         with tempfile.TemporaryDirectory() as temporary_directory:
