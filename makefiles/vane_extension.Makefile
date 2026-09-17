@@ -66,6 +66,7 @@ vane_wheel_dependencies: vane_prepare vane_verify_vcpkg
 	VCPKG_ROOT="$(VANE_VCPKG_ROOT)" \
 	VCPKG_INSTALLED_DIR="$(VANE_VCPKG_INSTALLED_DIR)" \
 	VCPKG_TARGET_TRIPLET="$(VCPKG_TARGET_TRIPLET)" \
+	VCPKG_HOST_TRIPLET="$(VCPKG_TARGET_TRIPLET)" \
 	VCPKG_MAX_CONCURRENCY="$(VANE_BUILD_JOBS)" \
 	bash "$(VANE_SOURCE_DIR)/scripts/bootstrap_vcpkg.sh" "$(VANE_SOURCE_DIR)"
 

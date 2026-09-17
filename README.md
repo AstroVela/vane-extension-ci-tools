@@ -147,7 +147,10 @@ SourceID.
 Generated locations can be overridden with `VANE_WHEEL_BUILD_DIR`,
 `VANE_WHEEL_DIST_DIR`, `VANE_VCPKG_ROOT`, and
 `VANE_VCPKG_INSTALLED_DIR`. The supported vcpkg triplet is exactly
-`x64-linux`; there is no alternate-platform or dependency fallback.
+`x64-linux` for both target libraries and host tools. The bootstrap explicitly
+selects the same host triplet so `protoc` and the gRPC code generator remain
+available with Vane revisions whose default host triplet differs. There is no
+alternate-platform or dependency fallback.
 
 ## GitHub Actions
 
