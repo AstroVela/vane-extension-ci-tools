@@ -163,7 +163,7 @@ jobs:
       - name: Install CMake, Ninja, and ccache
         run: |
           sudo apt-get update
-          sudo apt-get install -y ccache
+          sudo apt-get install -y ccache nasm
           python -m pip install "cmake>=3.29" "ninja>=1.10"
 
       - name: Restore Vane native compiler cache
@@ -308,6 +308,7 @@ jobs:
             curl \
             flex \
             libtool \
+            nasm \
             ninja-build \
             pkg-config \
             tar \
