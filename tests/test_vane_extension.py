@@ -922,12 +922,25 @@ class VaneWheelTests(unittest.TestCase):
                 MODULE.ConfigurationError, "require 64-bit x86 Linux"
             ),
         ):
-            MODULE.require_vane_wheel_platform("x64-linux")
+            MODULE.require_vane_wheel_platform("x64-linux-release")
 
         with self.assertRaisesRegex(
-            MODULE.ConfigurationError, "VCPKG_TARGET_TRIPLET=x64-linux"
+            MODULE.ConfigurationError, "VCPKG_TARGET_TRIPLET=x64-linux-release"
         ):
             MODULE.require_vane_wheel_platform("arm64-linux")
+
+    def test_wheel_platform_accepts_release_and_stock_triplets(self) -> None:
+        with (
+            mock.patch.object(MODULE.sys, "platform", "linux"),
+            mock.patch.object(
+                MODULE.os,
+                "uname",
+                return_value=mock.Mock(machine="x86_64"),
+            ),
+            mock.patch.object(MODULE.ctypes, "sizeof", return_value=8),
+        ):
+            MODULE.require_vane_wheel_platform("x64-linux-release")
+            MODULE.require_vane_wheel_platform("x64-linux")
 
     def test_requires_vane_arrow_flight_dependency_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
