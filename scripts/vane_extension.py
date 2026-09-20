@@ -642,7 +642,7 @@ def run_native(
     toolchain = resolve_vcpkg_toolchain(manifest)
     identity = resolve_vane_identity(vane_source, manifest)
 
-    target_triplet = os.environ.get("VCPKG_TARGET_TRIPLET", "x64-linux")
+    target_triplet = os.environ.get("VCPKG_TARGET_TRIPLET", "x64-linux-release")
     extension_config = resolve_within(
         extension_root, manifest.extension_config, "extension_config"
     )
@@ -772,15 +772,17 @@ def write_vane_wheel_dependency_prefix_config(
 
 
 def require_vane_wheel_platform(target_triplet: str) -> None:
+    # Release-only dependencies are the default; stock x64-linux checkouts
+    # stay accepted so pre-existing environments keep working.
     if (
         sys.platform != "linux"
         or os.uname().machine != "x86_64"
         or ctypes.sizeof(ctypes.c_void_p) != 8
-        or target_triplet != "x64-linux"
+        or target_triplet not in {"x64-linux", "x64-linux-release"}
     ):
         fail(
             "Vane wheel builds require 64-bit x86 Linux and "
-            "VCPKG_TARGET_TRIPLET=x64-linux"
+            "VCPKG_TARGET_TRIPLET=x64-linux-release or x64-linux"
         )
 
 
@@ -871,7 +873,7 @@ def build_vane_wheel(
     dist_dir: Path,
     jobs: int,
 ) -> Path:
-    target_triplet = os.environ.get("VCPKG_TARGET_TRIPLET", "x64-linux")
+    target_triplet = os.environ.get("VCPKG_TARGET_TRIPLET", "x64-linux-release")
     require_vane_wheel_platform(target_triplet)
     reject_duckdb_local_extension_config(vane_source)
     toolchain = resolve_vcpkg_toolchain(manifest)
