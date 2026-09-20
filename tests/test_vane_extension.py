@@ -1376,38 +1376,40 @@ class WorkflowContractTests(unittest.TestCase):
             root = Path(temporary_directory)
             scripts = root / "scripts"
             scripts.mkdir()
-            (scripts / "bootstrap_vcpkg.sh").write_text(
-                "set -eu\n"
-                'test "$VCPKG_TARGET_TRIPLET" = x64-linux\n'
-                'test "$VCPKG_HOST_TRIPLET" = "$VCPKG_TARGET_TRIPLET"\n'
-                'printf done > "$1/bootstrap-completed"\n'
-            )
-            for host_triplet in (None, "x64-linux-release"):
-                with self.subTest(host_triplet=host_triplet):
-                    environment = os.environ.copy()
-                    environment.pop("VCPKG_HOST_TRIPLET", None)
-                    if host_triplet:
-                        environment["VCPKG_HOST_TRIPLET"] = host_triplet
-                    completed = root / "bootstrap-completed"
-                    completed.unlink(missing_ok=True)
-                    subprocess.run(
-                        [
-                            "make",
-                            "--file",
-                            str(makefile),
-                            "--old-file=vane_prepare",
-                            "--old-file=vane_verify_vcpkg",
-                            "vane_wheel_dependencies",
-                            f"VANE_EXTENSION_ROOT={root}",
-                            f"VANE_SOURCE_DIR={root}",
-                            "VCPKG_TARGET_TRIPLET=x64-linux",
-                        ],
-                        env=environment,
-                        check=True,
-                        capture_output=True,
-                        text=True,
+            for target_triplet in ("x64-linux", "x64-linux-release"):
+                with self.subTest(target_triplet=target_triplet):
+                    (scripts / "bootstrap_vcpkg.sh").write_text(
+                        "set -eu\n"
+                        f'test "$VCPKG_TARGET_TRIPLET" = {target_triplet}\n'
+                        'test "$VCPKG_HOST_TRIPLET" = "$VCPKG_TARGET_TRIPLET"\n'
+                        'printf done > "$1/bootstrap-completed"\n'
                     )
-                    self.assertEqual(completed.read_text(), "done")
+                    for host_triplet in (None, "x64-linux-release"):
+                        with self.subTest(host_triplet=host_triplet):
+                            environment = os.environ.copy()
+                            environment.pop("VCPKG_HOST_TRIPLET", None)
+                            if host_triplet:
+                                environment["VCPKG_HOST_TRIPLET"] = host_triplet
+                            completed = root / "bootstrap-completed"
+                            completed.unlink(missing_ok=True)
+                            subprocess.run(
+                                [
+                                    "make",
+                                    "--file",
+                                    str(makefile),
+                                    "--old-file=vane_prepare",
+                                    "--old-file=vane_verify_vcpkg",
+                                    "vane_wheel_dependencies",
+                                    f"VANE_EXTENSION_ROOT={root}",
+                                    f"VANE_SOURCE_DIR={root}",
+                                    f"VCPKG_TARGET_TRIPLET={target_triplet}",
+                                ],
+                                env=environment,
+                                check=True,
+                                capture_output=True,
+                                text=True,
+                            )
+                            self.assertEqual(completed.read_text(), "done")
 
     def test_make_passes_committed_ci_tools_gitlink_as_expected_sha(self) -> None:
         expected_sha = "a" * 40

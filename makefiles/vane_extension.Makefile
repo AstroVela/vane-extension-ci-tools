@@ -15,7 +15,7 @@ VANE_VCPKG_INSTALLED_DIR ?= $(VANE_SOURCE_DIR)/vcpkg_installed
 VANE_BUILD_JOBS ?= 8
 VANE_PYTHON ?= python3
 VANE_SKIP_NATIVE_TESTS ?= 0
-VCPKG_TARGET_TRIPLET ?= x64-linux
+VCPKG_TARGET_TRIPLET ?= x64-linux-release
 override _VANE_EXPECTED_CI_TOOLS_VERSION := $(shell \
 	git -C "$(VANE_EXTENSION_ROOT)" \
 		rev-parse "HEAD:vane-extension-ci-tools" 2>/dev/null)
@@ -58,8 +58,8 @@ vane_wheel_dependencies: vane_prepare vane_verify_vcpkg
 	@case "$(VANE_BUILD_JOBS)" in \
 		''|*[!0-9]*|0) echo "VANE_BUILD_JOBS must be a positive integer" >&2; exit 2 ;; \
 	esac
-	@test "$(VCPKG_TARGET_TRIPLET)" = "x64-linux" || \
-		{ echo "VCPKG_TARGET_TRIPLET must be x64-linux" >&2; exit 2; }
+	@test "$(VCPKG_TARGET_TRIPLET)" = "x64-linux-release" -o "$(VCPKG_TARGET_TRIPLET)" = "x64-linux" || \
+		{ echo "VCPKG_TARGET_TRIPLET must be x64-linux-release or x64-linux" >&2; exit 2; }
 	@test "$$(uname -s)" = "Linux" && test "$$(uname -m)" = "x86_64" && \
 		test "$$(getconf LONG_BIT)" = "64" || \
 		{ echo "Vane wheel builds require 64-bit x86 Linux" >&2; exit 2; }
