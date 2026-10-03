@@ -558,12 +558,10 @@ def _require_increasing_release(provider: Provider, version: str, index: str) ->
         if (
             len(existing.release) == 4
             and existing.release[:3] == target.release[:3]
-            and (existing.pre, existing.post, existing.dev)
-            == (target.pre, target.post, target.dev)
-            and existing > target
+            and existing.release[3] >= target.release[3]
         ):
             raise ReleaseValidationError(
-                "provider release_number must increase beyond indexed releases for the same Vane version"
+                "provider release_number must increase beyond indexed releases for the same Vane X.Y.Z, including stage changes"
             )
 
 

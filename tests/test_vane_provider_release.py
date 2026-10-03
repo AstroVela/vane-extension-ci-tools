@@ -152,10 +152,44 @@ class ReleaseTests(unittest.TestCase):
             "_request_json",
             return_value=(
                 200,
-                {"releases": {"0.1.0.99": [], "0.2.0.3.dev4": [], "0.2.0.1": []}},
+                {"releases": {"0.1.0.99": [], "0.2.1.3.dev4": [], "0.2.0.1": []}},
             ),
         ):
             MODULE._require_increasing_release(provider, "0.2.0.2", "pypi")
+
+    def test_numbered_release_counter_continues_across_vane_stages(self) -> None:
+        cases = (
+            ("0.2.0.2.dev663", "0.2.0.1.dev664", False),
+            ("0.2.0.2rc1", "0.2.0.1", False),
+            ("0.2.0.2", "0.2.0.1.post1", False),
+            ("0.2.0.2.dev663", "0.2.0.2.dev664", False),
+            ("0.2.0.2.dev663", "0.2.0.3.dev664", True),
+            ("0.2.0.2rc1", "0.2.0.3", True),
+            ("0.2.0.2", "0.2.0.3.post1", True),
+            ("0.2.0.99.post1", "0.3.0.1", True),
+        )
+        for previous, candidate, accepted in cases:
+            with self.subTest(previous=previous, candidate=candidate):
+                provider = MODULE.Provider(
+                    "paimon",
+                    "vane-extension-paimon",
+                    (),
+                    MODULE.Version(candidate).release[3],
+                )
+                with mock.patch.object(
+                    MODULE,
+                    "_request_json",
+                    side_effect=[(404, None), (200, {"releases": {previous: []}})],
+                ):
+                    if accepted:
+                        MODULE._require_publishable({}, provider, candidate, "testpypi")
+                    else:
+                        with self.assertRaisesRegex(
+                            MODULE.ReleaseValidationError, "including stage changes"
+                        ):
+                            MODULE._require_publishable(
+                                {}, provider, candidate, "testpypi"
+                            )
 
     def test_configured_fourth_component_and_exact_vane_suffix(self) -> None:
         with self.config_path.open("a") as stream:
