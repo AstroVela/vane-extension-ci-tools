@@ -7,3 +7,4 @@ max_wheel_bytes = 100000000
 [providers.extension_name]
 distribution = "vane-extension-name"
 dependencies = []
+release_number = 1

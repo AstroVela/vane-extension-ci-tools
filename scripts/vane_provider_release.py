@@ -90,6 +90,7 @@ class Provider:
     name: str
     distribution: str
     dependencies: tuple[str, ...]
+    release_number: int | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,7 @@ class ReleaseConfig:
     platforms: tuple[str, ...]
     max_wheel_bytes: int
     providers: tuple[Provider, ...]
+    packaging_revision: str | None = None
 
     @property
     def tags(self) -> frozenset[Tag]:
@@ -142,7 +144,8 @@ def _string_list(
 def load_config(path: Path) -> ReleaseConfig:
     with path.open("rb") as source:
         raw = tomllib.load(source)
-    if set(raw) != {"interpreters", "platforms", "max_wheel_bytes", "providers"}:
+    required = {"interpreters", "platforms", "max_wheel_bytes", "providers"}
+    if not required <= set(raw) or set(raw) - required - {"packaging"}:
         raise ReleaseValidationError("release config has missing or unknown fields")
     interpreters = _string_list(raw["interpreters"], "interpreters")
     platforms = _string_list(raw["platforms"], "platforms")
@@ -163,10 +166,11 @@ def load_config(path: Path) -> ReleaseConfig:
     for name, entry in raw["providers"].items():
         if name == "vane" or not re.fullmatch(r"[a-z][a-z0-9_]*", name):
             raise ReleaseValidationError(f"invalid provider output name: {name!r}")
-        if not isinstance(entry, dict) or set(entry) != {
-            "distribution",
-            "dependencies",
-        }:
+        if (
+            not isinstance(entry, dict)
+            or not {"distribution", "dependencies"} <= set(entry)
+            or set(entry) - {"distribution", "dependencies", "release_number"}
+        ):
             raise ReleaseValidationError(
                 f"provider {name} has missing or unknown fields"
             )
@@ -181,6 +185,13 @@ def load_config(path: Path) -> ReleaseConfig:
                 "provider distributions must be unique canonical names other than vane-ai"
             )
         distributions.add(distribution)
+        release_number = entry.get("release_number")
+        if "release_number" in entry and (
+            type(release_number) is not int or release_number < 1
+        ):
+            raise ReleaseValidationError(
+                f"provider {name} release_number must be a positive integer"
+            )
         providers.append(
             Provider(
                 name,
@@ -188,9 +199,26 @@ def load_config(path: Path) -> ReleaseConfig:
                 _string_list(
                     entry["dependencies"], f"{name}.dependencies", allow_empty=True
                 ),
+                release_number,
             )
         )
-    config = ReleaseConfig(interpreters, platforms, limit, tuple(providers))
+    packaging_revision = None
+    if "packaging" in raw:
+        packaging = raw["packaging"]
+        if (
+            not isinstance(packaging, dict)
+            or set(packaging) != {"repository", "revision"}
+            or packaging["repository"] != "AstroVela/vane"
+            or not isinstance(packaging["revision"], str)
+            or not re.fullmatch(r"[0-9a-f]{40}", packaging["revision"])
+        ):
+            raise ReleaseValidationError(
+                "packaging must pin an exact AstroVela/vane commit"
+            )
+        packaging_revision = packaging["revision"]
+    config = ReleaseConfig(
+        interpreters, platforms, limit, tuple(providers), packaging_revision
+    )
     for provider in config.providers:
         config.dependency_closure(provider.name)
     return config
@@ -235,6 +263,18 @@ def validate_vane_version(value: str, channel: str) -> None:
         raise ReleaseValidationError(
             "Vane release channel forbids development versions"
         )
+
+
+def provider_version(vane_version: str, release_number: int) -> str:
+    base = Version(_canonical_version(vane_version, "Vane version"))
+    if base.epoch or base.local is not None or len(base.release) != 3:
+        raise ReleaseValidationError("provider versions require a Vane X.Y.Z version")
+    if type(release_number) is not int or release_number < 1:
+        raise ReleaseValidationError(
+            "provider release_number must be a positive integer"
+        )
+    prefix = ".".join(str(component) for component in base.release)
+    return str(Version(f"{prefix}.{release_number}{str(base)[len(prefix):]}"))
 
 
 def _read_wheel(path: Path, config: ReleaseConfig) -> WheelRecord:
@@ -357,6 +397,12 @@ def validate_release(
         for provider in config.providers
     }
     for provider in config.providers:
+        if provider.release_number is not None and versions[
+            provider.name
+        ] != provider_version(vane_version, provider.release_number):
+            raise ReleaseValidationError(
+                f"{provider.distribution} version must match its configured release_number"
+            )
         expected = {"vane-ai": vane_version}
         expected.update(
             {
@@ -471,6 +517,8 @@ def _require_publishable(
 ) -> None:
     status, document = _request_json(_index_url(provider, version, index))
     if status == 404:
+        if provider.release_number is not None:
+            _require_increasing_release(provider, version, index)
         return
     if status != 200:
         raise ReleaseValidationError(
@@ -481,6 +529,38 @@ def _require_publishable(
         raise ReleaseValidationError(
             f"indexed wheel identities conflict for {provider.distribution}=={version}"
         )
+
+
+def _require_increasing_release(provider: Provider, version: str, index: str) -> None:
+    status, document = _request_json(
+        f"{_index_base(index)}/{urllib.parse.quote(provider.distribution, safe='')}/json"
+    )
+    if status == 404:
+        return
+    if (
+        status != 200
+        or not isinstance(document, dict)
+        or not isinstance(document.get("releases"), dict)
+    ):
+        raise ReleaseValidationError(
+            "cannot verify the provider release sequence on the package index"
+        )
+    target = Version(version)
+    for value in document["releases"]:
+        try:
+            existing = Version(value)
+        except InvalidVersion:
+            continue
+        if (
+            len(existing.release) == 4
+            and existing.release[:3] == target.release[:3]
+            and (existing.pre, existing.post, existing.dev)
+            == (target.pre, target.post, target.dev)
+            and existing > target
+        ):
+            raise ReleaseValidationError(
+                "provider release_number must increase beyond indexed releases for the same Vane version"
+            )
 
 
 def require_indexes_publishable(

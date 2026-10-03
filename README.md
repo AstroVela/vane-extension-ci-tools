@@ -373,3 +373,26 @@ python -m pip install -r requirements-release.txt
 python -m unittest discover -s tests -v
 python -m compileall -q scripts tests
 ```
+
+## Numbered provider releases
+
+Declare `release_number = 1` in each `[providers.<name>]` table. Each provider
+increments its own number for a new release on the same Vane version. Vane
+`0.2.0` produces provider `0.2.0.1`; its next release is `0.2.0.2`. Reset to one
+when targeting a different Vane base. Vane prerelease and development suffixes
+follow the fourth component, for example `0.2.0.1.dev612`. The release gate
+requires the configured number, a complete wheel matrix, and exact base and
+provider requirements. A new numbered release must exceed indexed numbers for
+the same exact Vane base; retries must reuse byte-identical saved files.
+
+The engine/runtime pin remains in `vane-extension.toml`. To use new packaging
+rules with an already published engine, independently pin `[packaging]` with
+`repository = "AstroVela/vane"` and a full `revision` in the provider release
+config. Check out that exact commit in CI and set
+`VANE_PROVIDER_PACKAGING_SOURCE` to its directory. Both packaging and clean
+verification use `scripts/vane_provider_build.py` from the pinned CI-tools
+checkout; it delegates to Vane's generic tools and rejects dirty or mismatched
+packaging checkouts. Use `--operation verify` for verification. Native artifact
+and dependency descriptor hashes remain independent of the public package
+version. Historical configs without release numbers remain readable by this
+gate, but the new build adapter requires a declared number.
