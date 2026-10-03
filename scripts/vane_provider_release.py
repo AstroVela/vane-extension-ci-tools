@@ -19,7 +19,6 @@ import re
 import subprocess
 import sys
 import time
-import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -33,6 +32,11 @@ from packaging.requirements import Requirement
 from packaging.tags import Tag
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 provider packaging interpreters
+    import tomli as tomllib
 
 INDEX_JSON_BASES = {
     "testpypi": "https://test.pypi.org/pypi",
