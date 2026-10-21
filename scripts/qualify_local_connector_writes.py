@@ -313,6 +313,43 @@ def run_case(args) -> dict:
                     [],
                     "failed INSERT published no partial rows",
                 )
+            elif mode == "ctas" and args.connector == "paimon":
+                # Paimon's documented failure contract retains its prepared
+                # table. Require no committed data, then retry after explicit
+                # cleanup, as its existing distributed write tests do.
+                target = f"{prefix}.{label}"
+                table_path = root / "warehouse" / "probe.db" / label
+                check_equal(
+                    read(target), [], "failed Paimon CTAS retained an empty table"
+                )
+                snapshot_sql = (
+                    f"SELECT count(*) FROM paimon_snapshots({quote(table_path)})"
+                )
+                check_equal(
+                    con.execute(snapshot_sql).fetchone(),
+                    (0,),
+                    "failed Paimon CTAS snapshots",
+                )
+                con.execute(f"DROP TABLE {target}")
+                if table_path.exists():
+                    raise AssertionError(
+                        "explicit Paimon CTAS cleanup did not remove the retained target"
+                    )
+                retried = write(label, mode, udf=True)
+                check_equal(
+                    read(retried),
+                    transformed,
+                    "Paimon CTAS retry after explicit cleanup",
+                )
+                check_equal(
+                    con.execute(snapshot_sql).fetchone(),
+                    (1,),
+                    "Paimon CTAS retry snapshots",
+                )
+                persisted.append((retried, transformed))
+                result["operations"].append(
+                    {"name": "explicit_cleanup_retry_ctas", "rows": len(transformed)}
+                )
             elif mode == "ctas":
                 check_equal(
                     con.execute(

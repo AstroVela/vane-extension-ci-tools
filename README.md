@@ -179,9 +179,15 @@ The gate compares ordinary SQL, direct UDF fetch and DuckDB INSERT controls with
 connector INSERT/CTAS or COPY, including multiple batches, nulls, empty input,
 injected worker failures and readback through a fresh connection. UDFs change
 the row IDs so bypassing the function cannot pass. Failed operations must not
-publish partial rows, tables, Iceberg metadata or a final Vortex file. Actor
+publish partial rows, Iceberg metadata or a final Vortex file. Actor
 open/close events and host materialization counts are recorded in `matrix.json`.
 The work directory must be new; logs and data remain there for failure analysis.
+
+Paimon's [write contract](https://github.com/AstroVela/duckdb-paimon/blob/main_vane/VANE_README.md)
+retains the prepared empty table after failed CTAS. The gate requires zero rows
+and zero snapshots, explicitly drops that test-owned target, retries the write,
+and requires exactly one successful snapshot. Other catalog connectors must
+leave no CTAS table after failure.
 
 Iceberg defaults to Parquet COPY without an external catalog service. To qualify
 the Iceberg/Vortex combination, install an Iceberg provider built with Vortex
