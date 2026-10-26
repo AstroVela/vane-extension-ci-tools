@@ -65,11 +65,20 @@ def main(argv: list[str] | None = None) -> int:
                 "provider packaging requires a clean tooling checkout"
             )
     if any(
-        value == "--release-number" or value.startswith("--release-number=")
+        value.startswith("--")
+        and "--release-number".startswith(value.partition("=")[0])
         for value in remaining
     ):
         raise tools.ReleaseValidationError(
             "release_number must come only from the provider release config"
+        )
+    if any(
+        value.startswith("--")
+        and "--base-project-metadata".startswith(value.partition("=")[0])
+        for value in remaining
+    ):
+        raise tools.ReleaseValidationError(
+            "base project metadata must come only from the Vane runtime checkout"
         )
     script = (
         "build_extension_wheel.py"
@@ -85,6 +94,13 @@ def main(argv: list[str] | None = None) -> int:
     ]
     if args.operation == "build":
         command.extend(("--release-number", str(provider.release_number)))
+    else:
+        command.extend(
+            (
+                "--base-project-metadata",
+                str(args.vane_source.resolve() / "pyproject.toml"),
+            )
+        )
     subprocess.run([*command, *remaining], check=True)
     return 0
 

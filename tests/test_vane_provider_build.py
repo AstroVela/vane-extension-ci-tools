@@ -73,12 +73,38 @@ class ProviderBuildTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertTrue(command[2].endswith("scripts/verify_extension_wheel.py"))
         self.assertNotIn("--release-number", command)
+        self.assertEqual(
+            command[command.index("--base-project-metadata") + 1],
+            str(self.root / "engine/pyproject.toml"),
+        )
+
+    def test_verification_uses_runtime_metadata_with_separate_packaging_tools(self):
+        with mock.patch.dict(
+            "os.environ", {"VANE_PROVIDER_PACKAGING_SOURCE": str(self.root / "tools")}
+        ), mock.patch.object(
+            MODULE.subprocess, "check_output", side_effect=["a" * 40, ""]
+        ), mock.patch.object(
+            MODULE.subprocess, "run"
+        ) as run:
+            MODULE.main([*self.arguments, "--operation", "verify"])
+        command = run.call_args.args[0]
+        self.assertEqual(
+            command[2], str(self.root / "tools/scripts/verify_extension_wheel.py")
+        )
+        self.assertEqual(
+            command[command.index("--base-project-metadata") + 1],
+            str(self.root / "engine/pyproject.toml"),
+        )
 
     def test_wrong_revision_dirty_tools_and_number_overrides_are_rejected(self):
         cases = [
             (["b" * 40], []),
             (["a" * 40, " M scripts/build_extension_wheel.py"], []),
             (["a" * 40, ""], ["--release-number=99"]),
+            (["a" * 40, ""], ["--release-num=99"]),
+            (["a" * 40, ""], ["--base-project-metadata=other.toml"]),
+            (["a" * 40, ""], ["--base-project-metadata", "other.toml"]),
+            (["a" * 40, ""], ["--base-project=other.toml"]),
         ]
         for outputs, extra in cases:
             with self.subTest(extra=extra, outputs=outputs), mock.patch.object(

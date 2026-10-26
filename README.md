@@ -395,7 +395,11 @@ config. Check out that exact commit in CI and set
 `VANE_PROVIDER_PACKAGING_SOURCE` to its directory. Both packaging and clean
 verification use `scripts/vane_provider_build.py` from the pinned CI-tools
 checkout; it delegates to Vane's generic tools and rejects dirty or mismatched
-packaging checkouts. Use `--operation verify` for verification. Native artifact
+packaging checkouts. Use `--operation verify` for verification. The adapter
+supplies the runtime checkout's `pyproject.toml` as `--base-project-metadata`,
+so the base wheel's dependencies, extras and entry points remain checked against
+the matching runtime even when packaging tools have newer project metadata.
+Callers cannot override this source. Native artifact
 and dependency descriptor hashes remain independent of the public package
 version. Historical configs without release numbers remain readable by this
 gate, but the new build adapter requires a declared number.
