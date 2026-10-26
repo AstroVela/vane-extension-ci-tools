@@ -156,6 +156,46 @@ alternate-platform or dependency fallback.
 
 ## GitHub Actions
 
+The installed-provider local write gate is independent of the Ray lanes:
+
+```bash
+python -I vane-extension-ci-tools/scripts/qualify_local_connector_writes.py \
+  --connector lance \
+  --work-directory "$RUNNER_TEMP/local-connector-writes" \
+  --trust-identity vane-ci-test-key \
+  --vane-revision EXACT_VANE_COMMIT_SHA \
+  --ci-tools-version EXACT_CI_TOOLS_COMMIT_SHA
+```
+
+Run it after installing the verified base wheel, provider wheel and its exact
+dependency closure. The supported connectors are `lance`, `paimon`, `ducklake`,
+`iceberg` and `vortex`. Each invocation runs both `local` and `local-fast` with
+subprocess tasks and actors in four separate, bounded processes. It forbids Ray
+startup, rejects unsigned/autoinstalled extensions, checks the installed
+providers' signer/version/SourceID and records their exact identities. The tools
+checkout must be clean and match the supplied full commit SHA.
+
+The gate compares ordinary SQL, direct UDF fetch and DuckDB INSERT controls with
+connector INSERT/CTAS or COPY, including multiple batches, nulls, empty input,
+injected worker failures and readback through a fresh connection. UDFs change
+the row IDs so bypassing the function cannot pass. Failed operations must not
+publish partial rows, Iceberg metadata or a final Vortex file. Actor
+open/close events and host materialization counts are recorded in `matrix.json`.
+The work directory must be new; logs and data remain there for failure analysis.
+
+Paimon's [write contract](https://github.com/AstroVela/duckdb-paimon/blob/main_vane/VANE_README.md)
+retains the prepared empty table after failed CTAS. The gate requires zero rows
+and zero snapshots, explicitly drops that test-owned target, retries the write,
+and requires exactly one successful snapshot. Other catalog connectors must
+leave no CTAS table after failure.
+
+Iceberg defaults to Parquet COPY without an external catalog service. To qualify
+the Iceberg/Vortex combination, install an Iceberg provider built with Vortex
+support and its exact Avro/Vortex dependencies, then explicitly add
+`--iceberg-data-format vortex`. The gate checks `iceberg_metadata.file_format`
+and never substitutes Parquet when Vortex is requested. Keep the existing Ray
+lanes alongside this gate. This command neither builds nor publishes a release.
+
 An extension calls the reusable workflow with the same exact tool revision as
 its `vane-extension-ci-tools` submodule:
 
