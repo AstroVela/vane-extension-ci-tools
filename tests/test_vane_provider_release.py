@@ -138,6 +138,101 @@ class ReleaseTests(unittest.TestCase):
             "a" * 40,
         ]
 
+    def test_numbered_publish_rejects_a_lower_indexed_sequence(self) -> None:
+        provider = MODULE.Provider("paimon", "vane-extension-paimon", (), 1)
+        with mock.patch.object(
+            MODULE, "_request_json", return_value=(200, {"releases": {"0.2.0.2": []}})
+        ):
+            with self.assertRaisesRegex(
+                MODULE.ReleaseValidationError, "increase beyond indexed"
+            ):
+                MODULE._require_increasing_release(provider, "0.2.0.1", "pypi")
+        with mock.patch.object(
+            MODULE,
+            "_request_json",
+            return_value=(
+                200,
+                {"releases": {"0.1.0.99": [], "0.2.1.3.dev4": [], "0.2.0.1": []}},
+            ),
+        ):
+            MODULE._require_increasing_release(provider, "0.2.0.2", "pypi")
+
+    def test_numbered_release_counter_continues_across_vane_stages(self) -> None:
+        cases = (
+            ("0.2.0.2.dev663", "0.2.0.1.dev664", False),
+            ("0.2.0.2rc1", "0.2.0.1", False),
+            ("0.2.0.2", "0.2.0.1.post1", False),
+            ("0.2.0.2.dev663", "0.2.0.2.dev664", False),
+            ("0.2.0.2.dev663", "0.2.0.3.dev664", True),
+            ("0.2.0.2rc1", "0.2.0.3", True),
+            ("0.2.0.2", "0.2.0.3.post1", True),
+            ("0.2.0.99.post1", "0.3.0.1", True),
+        )
+        for previous, candidate, accepted in cases:
+            with self.subTest(previous=previous, candidate=candidate):
+                provider = MODULE.Provider(
+                    "paimon",
+                    "vane-extension-paimon",
+                    (),
+                    MODULE.Version(candidate).release[3],
+                )
+                with mock.patch.object(
+                    MODULE,
+                    "_request_json",
+                    side_effect=[(404, None), (200, {"releases": {previous: []}})],
+                ):
+                    if accepted:
+                        MODULE._require_publishable({}, provider, candidate, "testpypi")
+                    else:
+                        with self.assertRaisesRegex(
+                            MODULE.ReleaseValidationError, "including stage changes"
+                        ):
+                            MODULE._require_publishable(
+                                {}, provider, candidate, "testpypi"
+                            )
+
+    def test_configured_fourth_component_and_exact_vane_suffix(self) -> None:
+        with self.config_path.open("a") as stream:
+            stream.write("release_number = 2\n")
+        self.config = MODULE.load_config(self.config_path)
+        self.release(version="0.2.0.2.dev612")
+        self.assertEqual(self.validate(), {"paimon": "0.2.0.2.dev612"})
+        for path in self.root.glob("*.whl"):
+            path.unlink()
+        self.release(version="0.2.0.1.dev612")
+        with self.assertRaisesRegex(
+            MODULE.ReleaseValidationError, "configured release_number"
+        ):
+            self.validate()
+
+    def test_config_rejects_nonpositive_or_boolean_release_numbers(self) -> None:
+        original = self.config_path.read_text()
+        for number in ("0", "-1", "true", '"1"'):
+            with self.subTest(number=number):
+                self.config_path.write_text(original + f"release_number = {number}\n")
+                with self.assertRaisesRegex(
+                    MODULE.ReleaseValidationError, "positive integer"
+                ):
+                    MODULE.load_config(self.config_path)
+
+    def test_config_pins_separate_official_packaging_tools(self) -> None:
+        with self.config_path.open("a") as stream:
+            stream.write(
+                '[packaging]\nrepository = "AstroVela/vane"\nrevision = "'
+                + "a" * 40
+                + '"\n'
+            )
+        self.assertEqual(
+            MODULE.load_config(self.config_path).packaging_revision, "a" * 40
+        )
+        self.config_path.write_text(
+            self.config_path.read_text().replace("AstroVela/vane", "another/vane")
+        )
+        with self.assertRaisesRegex(
+            MODULE.ReleaseValidationError, "exact AstroVela/vane"
+        ):
+            MODULE.load_config(self.config_path)
+
     def test_single_provider_and_cli_outputs(self) -> None:
         self.release()
         self.assertEqual(self.validate(), {"paimon": PROVIDER_VERSION})
