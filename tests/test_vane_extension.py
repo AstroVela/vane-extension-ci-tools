@@ -90,9 +90,7 @@ class ManifestTests(unittest.TestCase):
 
     def test_rejects_non_exact_vcpkg_revision(self) -> None:
         with self.assertRaisesRegex(MODULE.ConfigurationError, "full lowercase"):
-            MODULE.load_manifest(
-                self.write_manifest(vcpkg_revision="main"), self.root
-            )
+            MODULE.load_manifest(self.write_manifest(vcpkg_revision="main"), self.root)
 
     def test_rejects_template_vcpkg_revision(self) -> None:
         with self.assertRaisesRegex(MODULE.ConfigurationError, "placeholder"):
@@ -103,9 +101,7 @@ class ManifestTests(unittest.TestCase):
     def test_rejects_missing_vcpkg_table(self) -> None:
         path = self.write_manifest()
         path.write_text(path.read_text().split("\n[vcpkg]\n", 1)[0] + "\n")
-        with self.assertRaisesRegex(
-            MODULE.ConfigurationError, "vcpkg must be a table"
-        ):
+        with self.assertRaisesRegex(MODULE.ConfigurationError, "vcpkg must be a table"):
             MODULE.load_manifest(path, self.root)
 
     def test_rejects_boolean_schema_version(self) -> None:
@@ -213,9 +209,7 @@ class VcpkgToolchainTests(unittest.TestCase):
 
     def test_accepts_clean_exact_vcpkg_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            _, toolchain, revision = self.create_checkout(
-                Path(temporary_directory)
-            )
+            _, toolchain, revision = self.create_checkout(Path(temporary_directory))
             with mock.patch.dict(
                 os.environ, {"VCPKG_TOOLCHAIN_PATH": str(toolchain)}, clear=True
             ):
@@ -239,9 +233,7 @@ class VcpkgToolchainTests(unittest.TestCase):
 
     def test_rejects_dirty_vcpkg_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            _, toolchain, revision = self.create_checkout(
-                Path(temporary_directory)
-            )
+            _, toolchain, revision = self.create_checkout(Path(temporary_directory))
             toolchain.write_text("# dirty\n")
             with (
                 mock.patch.dict(
@@ -914,13 +906,11 @@ class VaneWheelTests(unittest.TestCase):
         with (
             mock.patch.object(MODULE.sys, "platform", "linux"),
             mock.patch.object(
-                MODULE.os,
-                "uname",
-                return_value=mock.Mock(machine="aarch64"),
+                MODULE.platform,
+                "machine",
+                return_value="aarch64",
             ),
-            self.assertRaisesRegex(
-                MODULE.ConfigurationError, "require 64-bit x86 Linux"
-            ),
+            self.assertRaisesRegex(MODULE.ConfigurationError, "require Linux x86_64"),
         ):
             MODULE.require_vane_wheel_platform("x64-linux-release")
 
@@ -933,9 +923,9 @@ class VaneWheelTests(unittest.TestCase):
         with (
             mock.patch.object(MODULE.sys, "platform", "linux"),
             mock.patch.object(
-                MODULE.os,
-                "uname",
-                return_value=mock.Mock(machine="x86_64"),
+                MODULE.platform,
+                "machine",
+                return_value="x86_64",
             ),
             mock.patch.object(MODULE.ctypes, "sizeof", return_value=8),
         ):
@@ -945,10 +935,7 @@ class VaneWheelTests(unittest.TestCase):
     def test_requires_vane_arrow_flight_dependency_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            arrow_config = (
-                root
-                / "installed/x64-linux/share/arrow/ArrowConfig.cmake"
-            )
+            arrow_config = root / "installed/x64-linux/share/arrow/ArrowConfig.cmake"
             arrow_config.parent.mkdir(parents=True)
             arrow_config.write_text("# fixture\n")
 
@@ -962,16 +949,13 @@ class VaneWheelTests(unittest.TestCase):
                     MODULE.ConfigurationError, "ArrowFlightConfig.cmake"
                 ),
             ):
-                MODULE.require_vane_wheel_dependency_prefix(
-                    root / "vane", "x64-linux"
-                )
+                MODULE.require_vane_wheel_dependency_prefix(root / "vane", "x64-linux")
 
     def test_rejects_ignored_duckdb_local_extension_config(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             vane_source = Path(temporary_directory)
             local_config = (
-                vane_source
-                / "external/duckdb/extension/extension_config_local.cmake"
+                vane_source / "external/duckdb/extension/extension_config_local.cmake"
             )
             local_config.parent.mkdir(parents=True)
             local_config.write_text("# ambient fixture\n")
@@ -1021,8 +1005,7 @@ class VaneWheelTests(unittest.TestCase):
                 if command[1:3] == ["-m", "build"]:
                     output_dir = Path(command[command.index("--outdir") + 1])
                     fixture_wheel = (
-                        output_dir
-                        / "vane_ai-1.5.0-cp312-cp312-linux_x86_64.whl"
+                        output_dir / "vane_ai-1.5.0-cp312-cp312-linux_x86_64.whl"
                     )
                     fixture_wheel.write_bytes(b"fixture")
                 return ""
@@ -1078,9 +1061,7 @@ class VaneWheelTests(unittest.TestCase):
             command, cwd, environment = calls[0]
             self.assertEqual(command[1:4], ["-m", "build", "--wheel"])
             self.assertEqual(command[-1], str(vane_source))
-            self.assertNotEqual(
-                Path(command[command.index("--outdir") + 1]), dist_dir
-            )
+            self.assertNotEqual(Path(command[command.index("--outdir") + 1]), dist_dir)
             self.assertEqual(cwd, extension_root)
             assert environment is not None
             cmake_args = MODULE.shlex.split(environment["CMAKE_ARGS"])
@@ -1190,7 +1171,9 @@ class WorkflowContractTests(unittest.TestCase):
         )
         self.assertNotIn("id-token: write", readme)
 
-    def test_reusable_workflow_verifies_the_exact_official_ci_tools_checkout(self) -> None:
+    def test_reusable_workflow_verifies_the_exact_official_ci_tools_checkout(
+        self,
+    ) -> None:
         workflow = (
             Path(__file__).parents[1] / ".github/workflows/_vane_extension_ci.yml"
         ).read_text()
@@ -1200,12 +1183,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("ref: ${{ inputs.ci_tools_version }}", verify_job)
         self.assertIn("verify-ci-tools", verify_job)
         self.assertIn("--ci-tools-source ci-tools", verify_job)
-        self.assertIn(
-            "VANE_REUSABLE_WORKFLOW_REF: ${{ job.workflow_ref }}", verify_job
-        )
-        self.assertIn(
-            "VANE_REUSABLE_WORKFLOW_SHA: ${{ job.workflow_sha }}", verify_job
-        )
+        self.assertIn("VANE_REUSABLE_WORKFLOW_REF: ${{ job.workflow_ref }}", verify_job)
+        self.assertIn("VANE_REUSABLE_WORKFLOW_SHA: ${{ job.workflow_sha }}", verify_job)
         self.assertIn(
             "VANE_REUSABLE_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}",
             verify_job,
@@ -1239,10 +1218,7 @@ class WorkflowContractTests(unittest.TestCase):
         ).read_text()
         _, native_job = workflow.split("  native:\n", 1)
         native_job, wheel_job = native_job.split("  wheel:\n", 1)
-        expected = (
-            "vcpkgGitCommitId: "
-            "${{ steps.manifest.outputs.vcpkg_revision }}"
-        )
+        expected = "vcpkgGitCommitId: " "${{ steps.manifest.outputs.vcpkg_revision }}"
         self.assertEqual(native_job.count(expected), 1)
         self.assertEqual(wheel_job.count(expected), 1)
         self.assertNotIn("builtin-baseline", workflow)
@@ -1271,19 +1247,14 @@ class WorkflowContractTests(unittest.TestCase):
                 job.index(f"- name: {build_step}"),
             )
             self.assertIn(
-                "VANE_VCPKG_REVISION: "
-                "${{ steps.manifest.outputs.vcpkg_revision }}",
+                "VANE_VCPKG_REVISION: " "${{ steps.manifest.outputs.vcpkg_revision }}",
                 job,
             )
-            self.assertIn(
-                'marker="$VANE_VCPKG_ROOT/vcpkgLastBuiltCommitId"', job
-            )
+            self.assertIn('marker="$VANE_VCPKG_ROOT/vcpkgLastBuiltCommitId"', job)
             self.assertIn('test -f "$marker"', job)
             self.assertIn('test ! -L "$marker"', job)
             self.assertIn('test "$(wc -c < "$marker")" -eq 40', job)
-            self.assertIn(
-                'test "$(<"$marker")" = "$VANE_VCPKG_REVISION"', job
-            )
+            self.assertIn('test "$(<"$marker")" = "$VANE_VCPKG_REVISION"', job)
             self.assertIn('rm -- "$marker"', job)
             self.assertIn(
                 'vcpkg_status="$(git -C "$VANE_VCPKG_ROOT" '
@@ -1321,7 +1292,9 @@ class WorkflowContractTests(unittest.TestCase):
             wheel_job,
         )
 
-    def test_build_lanes_cache_bounded_compiler_objects_without_build_trees(self) -> None:
+    def test_build_lanes_cache_bounded_compiler_objects_without_build_trees(
+        self,
+    ) -> None:
         workflow = (
             Path(__file__).parents[1] / ".github/workflows/_vane_extension_ci.yml"
         ).read_text()
@@ -1358,58 +1331,31 @@ class WorkflowContractTests(unittest.TestCase):
             Path(__file__).parents[1] / "makefiles/vane_extension.Makefile"
         ).read_text()
         self.assertIn("vane_wheel: vane_wheel_dependencies", makefile)
-        self.assertIn(
-            'bash "$(VANE_SOURCE_DIR)/scripts/bootstrap_vcpkg.sh"', makefile
-        )
-        self.assertEqual(
-            makefile.count('VCPKG_MAX_CONCURRENCY="$(VANE_BUILD_JOBS)"'), 2
-        )
-        self.assertIn('test "$$(uname -m)" = "x86_64"', makefile)
-        self.assertIn('test "$$(getconf LONG_BIT)" = "64"', makefile)
+        self.assertIn("$(VANE_EXTENSION_COMMAND) wheel-dependencies", makefile)
+        self.assertIn('--vcpkg-root "$(VANE_VCPKG_ROOT)"', makefile)
+        self.assertNotIn("getconf LONG_BIT", makefile)
 
-    @unittest.skipUnless(sys.platform == "linux", "wheel lane is Linux-only")
     def test_wheel_bootstrap_uses_target_triplet_for_host_tools(self) -> None:
-        if os.uname().machine != "x86_64":
-            self.skipTest("wheel lane requires x86_64")
-        makefile = Path(__file__).parents[1] / "makefiles/vane_extension.Makefile"
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            scripts = root / "scripts"
-            scripts.mkdir()
-            for target_triplet in ("x64-linux", "x64-linux-release"):
-                with self.subTest(target_triplet=target_triplet):
-                    (scripts / "bootstrap_vcpkg.sh").write_text(
-                        "set -eu\n"
-                        f'test "$VCPKG_TARGET_TRIPLET" = {target_triplet}\n'
-                        'test "$VCPKG_HOST_TRIPLET" = "$VCPKG_TARGET_TRIPLET"\n'
-                        'printf done > "$1/bootstrap-completed"\n'
+            for triplet in ("x64-linux", "x64-linux-release"):
+                with (
+                    self.subTest(triplet=triplet),
+                    mock.patch.dict(
+                        os.environ,
+                        {
+                            "VCPKG_TARGET_TRIPLET": triplet,
+                            "VCPKG_HOST_TRIPLET": "wrong",
+                        },
+                    ),
+                    mock.patch.object(MODULE, "run") as run,
+                ):
+                    MODULE.bootstrap_wheel_dependencies(
+                        root, root / "vcpkg", root / "installed", 2
                     )
-                    for host_triplet in (None, "x64-linux-release"):
-                        with self.subTest(host_triplet=host_triplet):
-                            environment = os.environ.copy()
-                            environment.pop("VCPKG_HOST_TRIPLET", None)
-                            if host_triplet:
-                                environment["VCPKG_HOST_TRIPLET"] = host_triplet
-                            completed = root / "bootstrap-completed"
-                            completed.unlink(missing_ok=True)
-                            subprocess.run(
-                                [
-                                    "make",
-                                    "--file",
-                                    str(makefile),
-                                    "--old-file=vane_prepare",
-                                    "--old-file=vane_verify_vcpkg",
-                                    "vane_wheel_dependencies",
-                                    f"VANE_EXTENSION_ROOT={root}",
-                                    f"VANE_SOURCE_DIR={root}",
-                                    f"VCPKG_TARGET_TRIPLET={target_triplet}",
-                                ],
-                                env=environment,
-                                check=True,
-                                capture_output=True,
-                                text=True,
-                            )
-                            self.assertEqual(completed.read_text(), "done")
+                    environment = run.call_args.kwargs["env"]
+                    self.assertEqual(environment["VCPKG_TARGET_TRIPLET"], triplet)
+                    self.assertEqual(environment["VCPKG_HOST_TRIPLET"], triplet)
 
     def test_make_passes_committed_ci_tools_gitlink_as_expected_sha(self) -> None:
         expected_sha = "a" * 40
