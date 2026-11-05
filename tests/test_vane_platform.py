@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import platform
 import subprocess
 import sys
 import tempfile
@@ -95,7 +96,48 @@ class PlatformTests(unittest.TestCase):
                 environment["VCPKG_HOST_TRIPLET"], environment["VCPKG_TARGET_TRIPLET"]
             )
             self.assertEqual(environment["VCPKG_MAX_CONCURRENCY"], "2")
-            self.assertEqual(run.call_args.args[0][0], "bash")
+            self.assertEqual(run.call_args.args[0][0], tools.native_bash())
+
+    def test_windows_bash_comes_from_git_instead_of_the_wsl_launcher(self):
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value) / "Git installation"
+            git = root / "cmd/git.exe"
+            bash = root / "bin/bash.exe"
+            git.parent.mkdir(parents=True)
+            bash.parent.mkdir(parents=True)
+            git.touch()
+            bash.touch()
+            with (
+                mock.patch.object(tools.sys, "platform", "win32"),
+                mock.patch.object(
+                    tools.shutil, "which", return_value=str(git)
+                ) as which,
+            ):
+                self.assertEqual(tools.native_bash(), bash.as_posix())
+                which.assert_called_once_with("git")
+                bash.unlink()
+                with self.assertRaises(tools.ConfigurationError):
+                    tools.native_bash()
+
+    def test_real_dependency_bootstrap_uses_a_native_shell_with_spaces(self):
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value) / "Vane source with spaces"
+            script = root / "scripts/bootstrap_vcpkg.sh"
+            script.parent.mkdir(parents=True)
+            script.write_text(
+                "set -euo pipefail\n"
+                'test "$VCPKG_HOST_TRIPLET" = "$VCPKG_TARGET_TRIPLET"\n'
+                'uname -s > "$1/native-shell.txt"\n',
+                encoding="utf-8",
+            )
+            tools.bootstrap_wheel_dependencies(
+                root, root / "vcpkg", root / "installed", 2
+            )
+            system = (root / "native-shell.txt").read_text().strip()
+            if sys.platform == "win32":
+                self.assertTrue(system.startswith(("MINGW", "MSYS", "CYGWIN")))
+            else:
+                self.assertEqual(system, platform.system())
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import os
 import platform
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -811,6 +812,20 @@ def venv_python(root: Path) -> Path:
     return root / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
 
 
+def native_bash() -> str:
+    if sys.platform != "win32":
+        return "bash"
+    # Windows also ships a bash.exe launcher for WSL. Locate Bash beside the
+    # selected Git for Windows installation rather than launching that shim.
+    git = shutil.which("git")
+    if git:
+        for directory in Path(git).resolve().parents[:3]:
+            bash = directory / "bin/bash.exe"
+            if bash.is_file():
+                return bash.as_posix()
+    fail("Git for Windows Bash is required to bootstrap native dependencies")
+
+
 def bootstrap_wheel_dependencies(
     vane_source: Path, vcpkg_root: Path, installed_root: Path, jobs: int
 ) -> None:
@@ -827,7 +842,7 @@ def bootstrap_wheel_dependencies(
     )
     run(
         [
-            "bash",
+            native_bash(),
             (vane_source / "scripts/bootstrap_vcpkg.sh").as_posix(),
             vane_source.as_posix(),
         ],
