@@ -98,9 +98,8 @@ the complete Git history required by Vane's identity resolver. A new checkout
 is prepared and verified in a temporary sibling directory, then atomically
 published without replacing a destination that appeared concurrently. A failed
 fetch leaves the destination free for a clean retry. Atomic publication requires
-64-bit x86 Linux `renameat2`, invoked through the kernel syscall rather than a
-libc `renameat2` wrapper; the tools fail instead of falling back to a
-replacement-prone rename. If that checkout already exists, it must be clean and
+Linux x86_64 `renameat2`, macOS `renamex_np(RENAME_EXCL)`, or Windows'
+non-replacing rename. The tools never fall back to a replacement-prone rename. If that checkout already exists, it must be clean and
 at the exact revision; a shallow checkout is safely unshallowed. Existing
 checkouts are always verified by fetching the exact revision directly from the
 hard-coded official `AstroVela/vane` URL; a different `origin` cannot substitute
@@ -120,7 +119,12 @@ make vane_ci \
 
 ## Local wheel lane
 
-The wheel lane is intentionally Linux x86_64 only. It bootstraps Arrow Flight,
+The local wheel helpers support Linux x86_64, macOS arm64, and Windows x64.
+They select `x64-linux-release`, `arm64-osx-release`, or
+`x64-windows-static-release` from the native host and reject a mismatched
+triplet. Windows requires Git Bash and MSVC; its Python environment uses
+`Scripts/python.exe` and its C++ dependencies use the static CRT. The reusable
+integration workflow still runs its existing Linux qualification lanes. It bootstraps Arrow Flight,
 gRPC, and the rest of Vane's native dependencies from the exact pinned Vane
 checkout, then builds the extension's own vcpkg manifest separately:
 
