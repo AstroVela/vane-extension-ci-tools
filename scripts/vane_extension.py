@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -840,14 +841,22 @@ def bootstrap_wheel_dependencies(
         VCPKG_MAX_CONCURRENCY=str(jobs),
         VANE_BOOTSTRAP_PYTHON=Path(sys.executable).as_posix(),
     )
-    run(
-        [
-            native_bash(),
-            (vane_source / "scripts/bootstrap_vcpkg.sh").as_posix(),
-            vane_source.as_posix(),
-        ],
-        env=environment,
-    )
+    command = [
+        native_bash(),
+        (vane_source / "scripts/bootstrap_vcpkg.sh").as_posix(),
+        vane_source.as_posix(),
+    ]
+    for attempt in range(3):
+        try:
+            run(command, env=environment)
+            return
+        except subprocess.CalledProcessError:
+            if attempt == 2:
+                raise
+            # Reuse the partially installed prefix and vcpkg's checked download
+            # cache. The pinned bootstrap still verifies every source archive.
+            print("Dependency bootstrap failed; retrying in 5 seconds", file=sys.stderr)
+            time.sleep(5)
 
 
 def reject_duckdb_local_extension_config(vane_source: Path) -> None:

@@ -140,6 +140,40 @@ class PlatformTests(unittest.TestCase):
             else:
                 self.assertEqual(system, platform.system())
 
+    def test_dependency_bootstrap_retries_are_bounded_and_reuse_installed_files(self):
+        for succeed in (True, False):
+            with self.subTest(succeed=succeed), tempfile.TemporaryDirectory() as value:
+                root = Path(value)
+                script = root / "scripts/bootstrap_vcpkg.sh"
+                script.parent.mkdir()
+                script.write_text(
+                    "set -euo pipefail\n"
+                    "count=0\n"
+                    'if [ -f "$1/attempts" ]; then read -r count < "$1/attempts"; fi\n'
+                    "count=$((count + 1))\n"
+                    'printf "%s\\n" "$count" > "$1/attempts"\n'
+                    f'if [ "$count" -lt 3 ] || [ "{succeed}" = False ]; then exit 28; fi\n',
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                installed = root / "installed"
+                installed.mkdir()
+                sentinel = installed / "already-built"
+                sentinel.write_text("keep this package")
+                with mock.patch.object(tools.time, "sleep") as sleep:
+                    if succeed:
+                        tools.bootstrap_wheel_dependencies(
+                            root, root / "vcpkg", installed, 2
+                        )
+                    else:
+                        with self.assertRaises(subprocess.CalledProcessError):
+                            tools.bootstrap_wheel_dependencies(
+                                root, root / "vcpkg", installed, 2
+                            )
+                self.assertEqual((root / "attempts").read_text().strip(), "3")
+                self.assertEqual(sentinel.read_text(), "keep this package")
+                self.assertEqual(sleep.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
