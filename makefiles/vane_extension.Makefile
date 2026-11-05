@@ -20,7 +20,7 @@ override _VANE_EXPECTED_CI_TOOLS_VERSION := $(shell \
 	git -C "$(VANE_EXTENSION_ROOT)" \
 		rev-parse "HEAD:vane-extension-ci-tools" 2>/dev/null)
 
-VANE_EXTENSION_COMMAND = $(VANE_PYTHON) \
+VANE_EXTENSION_COMMAND = "$(VANE_PYTHON)" \
 	"$(VANE_EXTENSION_CI_TOOLS_DIR)/scripts/vane_extension.py" \
 	--manifest "$(VANE_MANIFEST)" \
 	--extension-root "$(VANE_EXTENSION_ROOT)"
