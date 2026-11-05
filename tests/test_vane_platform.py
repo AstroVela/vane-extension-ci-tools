@@ -113,7 +113,7 @@ class PlatformTests(unittest.TestCase):
                     tools.shutil, "which", return_value=str(git)
                 ) as which,
             ):
-                self.assertEqual(tools.native_bash(), bash.as_posix())
+                self.assertEqual(tools.native_bash(), bash.resolve().as_posix())
                 which.assert_called_once_with("git")
                 bash.unlink()
                 with self.assertRaises(tools.ConfigurationError):
@@ -129,6 +129,7 @@ class PlatformTests(unittest.TestCase):
                 'test "$VCPKG_HOST_TRIPLET" = "$VCPKG_TARGET_TRIPLET"\n'
                 'uname -s > "$1/native-shell.txt"\n',
                 encoding="utf-8",
+                newline="\n",
             )
             tools.bootstrap_wheel_dependencies(
                 root, root / "vcpkg", root / "installed", 2
