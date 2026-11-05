@@ -22,6 +22,60 @@ SPEC.loader.exec_module(tools)
 
 
 class PlatformTests(unittest.TestCase):
+    @unittest.skipUnless(
+        tools.shutil.which("cmake"), "CMake is required for the SDK probe"
+    )
+    def test_cmake_uses_the_sdk_static_windows_zlib_with_current_and_legacy_names(self):
+        for name in ("zs.lib", "zlib.lib"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as value:
+                root = Path(value).resolve()
+                prefix = root / "SDK with spaces"
+                (prefix / "lib").mkdir(parents=True)
+                (prefix / "include").mkdir()
+                library = prefix / "lib" / name
+                library.touch()
+                (prefix / "include/zlib.h").write_text(
+                    '#define ZLIB_VERSION "1.3.2"\n'
+                    "#define ZLIB_VER_MAJOR 1\n"
+                    "#define ZLIB_VER_MINOR 3\n"
+                    "#define ZLIB_VER_REVISION 2\n"
+                    "#define ZLIB_VER_SUBREVISION 0\n",
+                    encoding="utf-8",
+                )
+                with mock.patch.object(tools.sys, "platform", "win32"):
+                    config = tools.write_vane_wheel_dependency_prefix_config(
+                        root, prefix
+                    )
+                (root / "CMakeLists.txt").write_text(
+                    "cmake_minimum_required(VERSION 3.20)\n"
+                    "project(SDKZlib LANGUAGES NONE)\n"
+                    f'include("{config.as_posix()}")\n'
+                    "find_package(ZLIB 1 REQUIRED)\n"
+                    "get_target_property(selected ZLIB::ZLIB IMPORTED_LOCATION_RELEASE)\n"
+                    'file(WRITE "${CMAKE_BINARY_DIR}/selected.txt" "${selected}")\n',
+                    encoding="utf-8",
+                )
+                result = subprocess.run(
+                    ["cmake", "-S", str(root), "-B", str(root / "build")],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(
+                    (root / "build/selected.txt").read_text(), library.as_posix()
+                )
+
+    def test_missing_static_windows_zlib_fails_before_configuring(self):
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            with mock.patch.object(tools.sys, "platform", "win32"):
+                with self.assertRaisesRegex(
+                    tools.ConfigurationError, "static Windows Zlib"
+                ):
+                    tools.write_vane_wheel_dependency_prefix_config(
+                        root, root / "missing"
+                    )
+
     def test_triplets_match_the_host_and_reject_other_hosts(self):
         targets = (
             ("linux", "x86_64", "x64-linux-release"),
