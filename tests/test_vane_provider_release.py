@@ -30,6 +30,15 @@ PLATFORM = "manylinux_2_28_x86_64"
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_runtime_macos_floor_and_architecture_must_support_the_provider(self):
+        compatible = MODULE.runtime_platform_supports_provider
+        self.assertTrue(compatible("macosx_11_0_arm64", "macosx_15_0_arm64"))
+        self.assertTrue(compatible("macosx_11_0_universal2", "macosx_15_0_arm64"))
+        self.assertFalse(compatible("macosx_16_0_arm64", "macosx_15_0_arm64"))
+        self.assertFalse(compatible("macosx_11_0_x86_64", "macosx_15_0_arm64"))
+        self.assertFalse(compatible("win_amd64", "macosx_15_0_arm64"))
+        self.assertTrue(compatible("win_amd64", "win_amd64"))
+
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
