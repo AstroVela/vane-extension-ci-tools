@@ -29,7 +29,7 @@ from email.policy import default
 from pathlib import Path
 
 from packaging.requirements import Requirement
-from packaging.tags import Tag
+from packaging.tags import Tag, mac_platforms
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
 
@@ -43,6 +43,18 @@ INDEX_JSON_BASES = {
     "pypi": "https://pypi.org/pypi",
 }
 RELEASE_CHANNELS = ("testpypi-dev", "release")
+
+
+def runtime_platform_supports_provider(runtime: str, provider: str) -> bool:
+    """A base wheel may have a lower macOS minimum than its native provider."""
+    if runtime == provider:
+        return True
+    macos = re.fullmatch(r"macosx_([0-9]+)_([0-9]+)_(arm64|x86_64)", provider)
+    if macos is None:
+        return False
+    return runtime in mac_platforms((int(macos[1]), int(macos[2])), arch=macos[3])
+
+
 MAX_METADATA_BYTES = 1024 * 1024
 MAX_INDEX_BYTES = 4 * 1024 * 1024
 
